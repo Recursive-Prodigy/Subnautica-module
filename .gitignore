@@ -1,0 +1,16 @@
+# Virtual environments
+rvc_runtime/
+venv/
+env/
+__pycache__/
+*.pyc
+
+# Heavy AI weights & audio artifacts
+rvc_models/
+piper/models/
+*.wav
+*.mp3
+
+# Editor / config files with local secrets
+.vscode/
+pda_config.json
