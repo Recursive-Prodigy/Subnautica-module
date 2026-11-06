@@ -602,7 +602,7 @@ def log_sleep(sleep_time: str, wake_time: str, interruptions: int = 0, notes: st
     duration = max(0.0, (t_wake_naive - t_sleep_naive).total_seconds() / 3600.0)
     now_utc = _get_now_utc_iso()
 
-    # Convert to UTC ISO strings so Supabase does not corrupt offsets
+    # Explicitly attach local timezone and convert to UTC
     user_tz = time_manager.target_tz
     t_sleep_utc = t_sleep_naive.replace(tzinfo=user_tz).astimezone(timezone.utc).isoformat()
     t_wake_utc = t_wake_naive.replace(tzinfo=user_tz).astimezone(timezone.utc).isoformat()

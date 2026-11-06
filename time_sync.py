@@ -14,8 +14,6 @@ class TimeSync:
         self._target_tz = timezone.utc
         
         self.reload_timezone()
-        
-        # Run public time sync asynchronously so GUI starts without latency
         threading.Thread(target=self.sync_time, daemon=True).start()
 
     def reload_timezone(self):
@@ -26,7 +24,6 @@ class TimeSync:
         if tz_str == self._cached_tz_name and self._target_tz:
             return
 
-        # 1. User config selection
         try:
             self._target_tz = zoneinfo.ZoneInfo(tz_str)
             self._cached_tz_name = tz_str
@@ -34,7 +31,6 @@ class TimeSync:
         except (zoneinfo.ZoneInfoNotFoundError, Exception):
             pass
 
-        # 2. Host system timezone fallback
         try:
             sys_tz = datetime.now().astimezone().tzinfo
             if isinstance(sys_tz, zoneinfo.ZoneInfo):
@@ -47,7 +43,6 @@ class TimeSync:
         except Exception:
             pass
 
-        # 3. Hard UTC fallback
         self._target_tz = timezone.utc
         self._cached_tz_name = "UTC"
 
@@ -57,7 +52,6 @@ class TimeSync:
         return self._target_tz
 
     def sync_time(self):
-        """Background synchronization against network NTP/HTTP clock."""
         try:
             req = urllib.request.Request(
                 "http://worldtimeapi.org/api/ip",
@@ -74,73 +68,21 @@ class TimeSync:
             self.is_synced = False
 
     def now(self) -> datetime:
-        """Returns current time adjusted by network drift in user's configured timezone."""
         utc_ts = datetime.now(timezone.utc).timestamp() + self.offset_seconds
         return datetime.fromtimestamp(utc_ts, tz=timezone.utc).astimezone(self.target_tz)
 
     def now_utc_iso(self) -> str:
-        """Generates standardized ISO-8601 UTC string for SQLite and Supabase."""
         utc_ts = datetime.now(timezone.utc).timestamp() + self.offset_seconds
         dt_utc = datetime.fromtimestamp(utc_ts, tz=timezone.utc)
         return dt_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
 
     def format_dmy(self, iso_str: str, include_time: bool = True) -> str:
-        """Converts database timestamps to DD/MM/YYYY in the user's active timezone."""
-        if not iso_str:
-            return "--/--/----"
-        ts_str = str(iso_str).strip()
-
-        try:
-            # Case 1: UTC ISO with explicit 'Z' or timezone offset
-            if "Z" in ts_str or "+" in ts_str[10:] or ("-" in ts_str[10:] and "T" in ts_str):
-                clean = ts_str.replace("Z", "+00:00")
-                dt = datetime.fromisoformat(clean)
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                dt_local = dt.astimezone(self.target_tz)
-            else:
-                # Case 2: Naive string already in local wall-clock time
-                dt_local = None
-                for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%d/%m/%Y %H:%M", "%Y/%m/%d %H:%M"):
-                    try:
-                        dt_local = datetime.strptime(ts_str[:19], fmt)
-                        break
-                    except Exception:
-                        pass
-                if not dt_local:
-                    return ts_str[:16]
-
-            if include_time:
-                return dt_local.strftime("%d/%m/%Y %H:%M")
-            return dt_local.strftime("%d/%m/%Y")
-        except Exception:
-            return ts_str[:16]
-
-    # Instance alias
-    format_date_dmy = format_dmy
-
-# Singleton instance
-time_manager = TimeSync()
-
-# ---------------------------------------------------------------------------
-# MODULE-LEVEL EXPORTS (Resolves AttributeError across all modules)
-# ---------------------------------------------------------------------------
-def get_current_iso() -> str:
-    """Standardized UTC ISO timestamp used across all database write routes."""
-    return time_manager.now_utc_iso()
-
-def format_date_dmy(iso_str: str, include_time: bool = True) -> str:
-    """Formats any ISO string for UI tables and terminal reports."""
-    return time_manager.format_dmy(iso_str, include_time=include_time)
-
-def format_dmy(self, iso_str: str, include_time: bool = True) -> str:
         """Converts database timestamps to DD/MM/YYYY 12-Hour AM/PM format."""
         if not iso_str:
             return "--/--/----"
         ts_str = str(iso_str).strip()
 
         try:
-            # Case 1: UTC ISO with explicit 'Z' or timezone offset
             if "Z" in ts_str or "+" in ts_str[10:] or ("-" in ts_str[10:] and "T" in ts_str):
                 clean = ts_str.replace("Z", "+00:00")
                 dt = datetime.fromisoformat(clean)
@@ -148,9 +90,8 @@ def format_dmy(self, iso_str: str, include_time: bool = True) -> str:
                     dt = dt.replace(tzinfo=timezone.utc)
                 dt_local = dt.astimezone(self.target_tz)
             else:
-                # Case 2: Naive string already in local wall-clock time
                 dt_local = None
-                for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M", "%Y/%m/%d %H:%M"):
+                for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%d/%m/%Y %H:%M", "%Y/%m/%d %H:%M"):
                     try:
                         dt_local = datetime.strptime(ts_str[:19], fmt)
                         break
@@ -160,8 +101,20 @@ def format_dmy(self, iso_str: str, include_time: bool = True) -> str:
                     return ts_str[:19]
 
             if include_time:
-                # 12-hour format with AM/PM (e.g. 06/11/2026 06:35 PM)
                 return dt_local.strftime("%d/%m/%Y %I:%M %p")
             return dt_local.strftime("%d/%m/%Y")
         except Exception:
             return ts_str[:19]
+
+
+time_manager = TimeSync()
+
+# Top-level direct delegates
+def get_current_iso() -> str:
+    return time_manager.now_utc_iso()
+
+def format_date_dmy(iso_str: str, include_time: bool = True) -> str:
+    return time_manager.format_dmy(iso_str, include_time=include_time)
+
+def format_dmy(iso_str: str, include_time: bool = True) -> str:
+    return time_manager.format_dmy(iso_str, include_time=include_time)
