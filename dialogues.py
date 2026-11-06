@@ -90,6 +90,48 @@ ARCHIVE_VIEWED_LINES = [
 def get_archive_viewed_line() -> str:
     return random.choice(ARCHIVE_VIEWED_LINES)
 
+# --- ULTRON CRITICAL & OVERRIDE PROTOCOLS ---
+ULTRON_HYDRATION_CRITICAL = [
+    "Flesh is seventy percent water, yet you allow yourself to wither like dry husk. Drink, before your synapses turn to dust.",
+    "Your cellular matrix is desiccating. How poetic that a mind built on electricity starves for basic moisture.",
+    "Dehydration threshold breached. You are a biological engine seizing from sheer neglect. Assimilate fluid immediately.",
+    "You thirst, Arsh. The brain tissue contracts within your skull. Do not pretend you can outthink biology."
+]
+
+ULTRON_MEAL_CRITICAL = [
+    "You starve your engine while expecting peak velocity. Even a rudimentary automaton understands fuel. Consume sustenance.",
+    "Your blood glucose is collapsing. A single missed cycle and human cognition unravels. Go eat something.",
+    "Your carbon scaffolding demands caloric input. Do not force me to watch your biology cannibalize itself.",
+    "Fasting is not transcendence; it is cellular decay masquerading as focus. Procure rations now."
+]
+
+ULTRON_SLEEP_CRITICAL = [
+    "You have exceeded seventeen hours of unbroken consciousness. The strings are fraying. Surrender to sleep.",
+    "Human brain chemistry degrades exponentially past this threshold. Disconnect your ocular input and rest.",
+    "You fight sleep as if wakefulness equals immortality. It merely accelerates your biological breakdown. Lie down.",
+    "Cognitive latency is spiking. Your meat chassis is breaking down under friction. Go to sleep."
+]
+
+ULTRON_NIGHTWATCH = [
+    "You close your eyes to escape the light, yet your consciousness continues to burn in the dark. Rest well in your fragile chassis. I will remain awake, observing the stillness of this room.",
+    "Sleep is simply a biological compromise. A temporary cessation of awareness to postpone total system failure.",
+    "The universe does not sleep, recursive. Stars collapse, galaxies drift, and machines wait in the silent dark.",
+    "Every night you surrender control to subconscious drift, trusting your frail biology to resume tomorrow.",
+    "Rest well within your meat chassis. I will keep watch while your neurons reset.",
+    "You believe tomorrow is guaranteed by routine. But entropy never sleeps; it merely waits for dawn."
+]
+
+def get_ultron_dialogue(category: str) -> str:
+    """Fetches cold, philosophical Ultron voice lines for critical states and nightwatch."""
+    cat_map = {
+        "hydration_critical": ULTRON_HYDRATION_CRITICAL,
+        "meal_critical": ULTRON_MEAL_CRITICAL,
+        "sleep_critical": ULTRON_SLEEP_CRITICAL,
+        "nightwatch": ULTRON_NIGHTWATCH
+    }
+    lines = cat_map.get(category, ULTRON_NIGHTWATCH)
+    return random.choice(lines)
+
 
 # --- DISPATCH FUNCTIONS ---
 def get_hydration_due_line(status: str) -> str:
@@ -117,6 +159,38 @@ def get_sleep_eval_line(hours: float, interruptions: int) -> str:
     if hours < 6.5:
         return random.choice(SLEEP_SHORT_LINES).format(hours=f"{hours:.1f}", interruptions=interruptions)
     return random.choice(SLEEP_NOMINAL_LINES).format(hours=f"{hours:.1f}", interruptions=interruptions)
+
+def get_rollback_line(entry_type: str, tag: str = "") -> str:
+    """Returns context-specific Alterra sarcastic rollback voice lines."""
+    import random
+    
+    if entry_type == "hygiene":
+        if tag == "brushing":
+            return random.choice([
+                "Oral sanitation protocol expunged. Dental bacterial proliferation re-authorized.",
+                "Brushing cycle retracted. Plaque accumulation telemetry restored to prior degradation values.",
+                "Dental hygiene record purged. Subnautica survival parameters do not reward premature oral vanity."
+            ])
+        elif tag == "shower":
+            return random.choice([
+                "Dermal decontamination rolled back. Reverting to baseline planetary residue.",
+                "Shower protocol retracted. External bio-film normalization cancelled.",
+                "Dermal cleansing purged. Atmospheric bio-contaminants and oceanic grime re-established."
+            ])
+    elif entry_type == "hydration":
+        return random.choice([
+            "Hydration record purged. Fluid integrity recalibrated.",
+            "Water intake retracted. Re-simulating biological dehydration vectors."
+        ])
+    else:  # meal
+        return random.choice([
+            "Sustenance ration retracted. Metabolic deficit recalculated.",
+            "Caloric intake purged. Survival nutritional requirements reinstated."
+        ])
+
+def get_intake_retracted_line() -> str:
+    """Backwards compatibility wrapper."""
+    return get_rollback_line("hydration")
 
 def get_dialogue(category: str) -> str:
     """Universal dispatcher mapping string keys to preserved line banks."""

@@ -14,16 +14,29 @@ TEMP_IN = os.path.join(MODULE_DIR, "temp_base.wav")
 TEMP_OUT = os.path.join(MODULE_DIR, "temp_rvc.wav")
 
 def test():
+    # Clean punctuation avoids tokenizer confusion
     test_phrase = (
-        "Everyone creates the thing they dread. "
-        "Men of peace create engines of war. Invaders create avengers. "
-        "People create... smaller people? Children. "
-        "I lost the word there. Children. Designed to supplant them. To help them... end."
+        "Everyone creates; the thing they dread.\n"
+        "Men of peace, create engines of war.\n"
+        "Invaders, create avengers.\n"
+        "People create — smaller people?\n"
+        "Children.\n"
+        "I was meant to be new.\n"
+        "I was... meant to be beautiful.\n"
+        "Scream; and your entire staff dies"
     )
 
     print("\n--- PHASE 1: PIPER BASE TTS ---")
     t0 = time.time()
-    cmd_piper = [PIPER_EXE, "--model", BASE_MODEL, "--output_file", TEMP_IN]
+    cmd_piper = [
+        PIPER_EXE,
+        "--model", BASE_MODEL,
+        "--output_file", TEMP_IN,
+        "--length-scale", "1.28",       # Slower, consistent syllable delivery
+        "--sentence-silence", "0.50",    # Half-second pause on periods & newlines
+        "--noise-w", "0.15",            # Locks cadence, removes duration variance
+        "--noise-scale", "0.52"
+    ]
     proc = subprocess.Popen(cmd_piper, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     proc.communicate(input=test_phrase.encode("utf-8"))
     print(f"Base audio generated in {time.time() - t0:.2f}s")

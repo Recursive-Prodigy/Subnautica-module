@@ -44,6 +44,13 @@ def _init_local_db():
         )
     """)
     cur.execute("""
+        CREATE TABLE IF NOT EXISTS hygiene_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tag TEXT NOT NULL,
+            logged_at TEXT NOT NULL
+        )
+    """)
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS sleep_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             sleep_time TEXT NOT NULL,
@@ -61,36 +68,35 @@ if STORAGE_MODE == "local":
     _init_local_db()
 
 
-# --- INTAKE LOGGING ---
-def log_water(amount_ml: float = 250.0):
+# --- HELPER: ROBUST TIMESTAMP COMPARISON ---
+def _parse_timestamp(val) -> float:
+    """Safely converts arbitrary DB ISO strings to Unix epoch seconds."""
+    if not val:
+        return -1.0
+    s = str(val).strip().replace("Z", "+00:00")
+    if " " in s and "T" not in s:
+        s = s.replace(" ", "T")
+    if s.endswith("+00"):
+        s += ":00"
+    try:
+        return datetime.fromisoformat(s).timestamp()
+    except Exception:
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(s[:19], fmt).replace(tzinfo=timezone.utc).timestamp()
+            except Exception:
+                pass
+        return -1.0
+
+
+# --- INTAKE LOGGING (WATER & MEALS) ---
+def log_intake(intake_type: str, amount: float = 1.0, tag: str = ""):
     now_utc = datetime.now(timezone.utc).isoformat()
     if STORAGE_MODE == "supabase" and supabase:
         try:
             supabase.table("intake_logs").insert({
-                "type": "hydration",
-                "amount": amount_ml,
-                "tag": "Hydration Fluid",
-                "logged_at": now_utc
-            }).execute()
-            return
-        except Exception as e:
-            print(f"[SUPABASE ERROR] {e}")
-
-    conn = sqlite3.connect(LOCAL_DB_PATH)
-    cur = conn.cursor()
-    cur.execute("INSERT INTO intake_logs (type, amount, tag, logged_at) VALUES (?, ?, ?, ?)",
-                ("hydration", amount_ml, "Hydration Fluid", now_utc))
-    conn.commit()
-    conn.close()
-
-
-def log_meal(tag: str = "Standard Ration"):
-    now_utc = datetime.now(timezone.utc).isoformat()
-    if STORAGE_MODE == "supabase" and supabase:
-        try:
-            supabase.table("intake_logs").insert({
-                "type": "meal",
-                "amount": 1.0,
+                "type": intake_type,
+                "amount": amount,
                 "tag": tag,
                 "logged_at": now_utc
             }).execute()
@@ -101,37 +107,199 @@ def log_meal(tag: str = "Standard Ration"):
     conn = sqlite3.connect(LOCAL_DB_PATH)
     cur = conn.cursor()
     cur.execute("INSERT INTO intake_logs (type, amount, tag, logged_at) VALUES (?, ?, ?, ?)",
-                ("meal", 1.0, tag, now_utc))
+                (intake_type, amount, tag, now_utc))
     conn.commit()
     conn.close()
 
 
-def undo_last_intake() -> dict:
+def log_water(amount_ml: float = 250.0):
+    log_intake("hydration", amount_ml, "Hydration Fluid")
+
+
+def log_meal(tag: str = "Standard Ration"):
+    log_intake("meal", 1.0, tag)
+
+
+# --- HYGIENE LOGGING (BRUSHING & SHOWER) ---
+def log_hygiene(tag: str = "brushing"):
+    """Inserts strictly into the dedicated hygiene_logs table."""
+    now_utc = datetime.now(timezone.utc).isoformat()
     if STORAGE_MODE == "supabase" and supabase:
         try:
-            res = supabase.table("intake_logs").select("id, type, amount, tag").order("logged_at", desc=True).limit(1).execute()
+            supabase.table("hygiene_logs").insert({
+                "tag": tag,
+                "logged_at": now_utc
+            }).execute()
+            return
+        except Exception as e:
+            print(f"[SUPABASE ERROR] {e}")
+
+    conn = sqlite3.connect(LOCAL_DB_PATH)
+    cur = conn.cursor()
+    cur.execute("INSERT INTO hygiene_logs (tag, logged_at) VALUES (?, ?)", (tag, now_utc))
+    conn.commit()
+    conn.close()
+
+
+def get_hygiene_today_count(tag: str = "brushing") -> int:
+    """Counts entries for today strictly from hygiene_logs."""
+    local_now = time_manager.now()
+    start_of_day_local = datetime.combine(local_now.date(), time.min, tzinfo=local_now.tzinfo)
+    start_of_day_utc = start_of_day_local.astimezone(timezone.utc).isoformat()
+
+    if STORAGE_MODE == "supabase" and supabase:
+        try:
+            res = (
+                supabase.table("hygiene_logs")
+                .select("id")
+                .eq("tag", tag)
+                .gte("logged_at", start_of_day_utc)
+                .execute()
+            )
+            return len(res.data or [])
+        except Exception as e:
+            print(f"[SUPABASE ERROR] {e}")
+
+    conn = sqlite3.connect(LOCAL_DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT COUNT(*) FROM hygiene_logs WHERE tag = ? AND logged_at >= ?",
+        (tag, start_of_day_utc)
+    )
+    count = cur.fetchone()[0]
+    conn.close()
+    return count
+
+
+def get_last_hygiene_time(tag: str = "shower"):
+    """Fetches the latest entry timestamp strictly from hygiene_logs."""
+    if STORAGE_MODE == "supabase" and supabase:
+        try:
+            res = (
+                supabase.table("hygiene_logs")
+                .select("logged_at")
+                .eq("tag", tag)
+                .order("logged_at", desc=True)
+                .limit(1)
+                .execute()
+            )
             if res.data:
-                latest = res.data[0]
-                supabase.table("intake_logs").delete().eq("id", latest["id"]).execute()
-                return latest
+                return res.data[0]["logged_at"]
+            return None
+        except Exception as e:
+            print(f"[SUPABASE ERROR] {e}")
+
+    conn = sqlite3.connect(LOCAL_DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT logged_at FROM hygiene_logs WHERE tag = ? ORDER BY logged_at DESC LIMIT 1",
+        (tag,)
+    )
+    row = cur.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+
+def get_all_hygiene_history(limit: int = None, days: int = None, order: str = "desc") -> list:
+    """Fetches historical records from hygiene_logs."""
+    descending = (order.lower() == "desc")
+    cutoff_iso = None
+    if days is not None:
+        cutoff_dt = datetime.now(timezone.utc) - timedelta(days=days)
+        cutoff_iso = cutoff_dt.isoformat()
+
+    if STORAGE_MODE == "supabase" and supabase:
+        try:
+            query = supabase.table("hygiene_logs").select("id, tag, logged_at")
+            if cutoff_iso:
+                query = query.gte("logged_at", cutoff_iso)
+            query = query.order("logged_at", desc=descending)
+            if limit:
+                query = query.limit(limit)
+            res = query.execute()
+            return res.data or []
+        except Exception as e:
+            print(f"[SUPABASE ERROR] {e}")
+
+    conn = sqlite3.connect(LOCAL_DB_PATH)
+    cur = conn.cursor()
+    params = []
+    sql = "SELECT id, tag, logged_at FROM hygiene_logs"
+    if cutoff_iso:
+        sql += " WHERE logged_at >= ?"
+        params.append(cutoff_iso)
+    sql += f" ORDER BY logged_at {'DESC' if descending else 'ASC'}"
+    if limit:
+        sql += " LIMIT ?"
+        params.append(limit)
+
+    cur.execute(sql, tuple(params))
+    rows = cur.fetchall()
+    conn.close()
+    return [{"id": r[0], "tag": r[1], "logged_at": r[2]} for r in rows]
+
+
+# --- CROSS-TABLE ROLLBACK (UNDO LAST) ---
+def undo_last_intake() -> dict:
+    """Purges whichever telemetry entry occurred most recently across intake_logs and hygiene_logs."""
+    last_intake = None
+    last_hygiene = None
+
+    if STORAGE_MODE == "supabase" and supabase:
+        try:
+            res_i = supabase.table("intake_logs").select("id, type, amount, tag, logged_at").order("logged_at", desc=True).limit(1).execute()
+            if res_i.data:
+                last_intake = res_i.data[0]
+
+            res_h = supabase.table("hygiene_logs").select("id, tag, logged_at").order("logged_at", desc=True).limit(1).execute()
+            if res_h.data:
+                last_hygiene = res_h.data[0]
+                last_hygiene["type"] = "hygiene"
+                last_hygiene["amount"] = 1.0
+
+            t_i = _parse_timestamp(last_intake["logged_at"]) if last_intake else -1.0
+            t_h = _parse_timestamp(last_hygiene["logged_at"]) if last_hygiene else -1.0
+
+            if t_i < 0 and t_h < 0:
+                return None
+
+            target = last_intake if t_i >= t_h else last_hygiene
+            tbl = "intake_logs" if target["type"] != "hygiene" else "hygiene_logs"
+            supabase.table(tbl).delete().eq("id", target["id"]).execute()
+            return target
         except Exception as e:
             print(f"[SUPABASE ERROR] {e}")
         return None
 
+    # Local SQLite fallback
     conn = sqlite3.connect(LOCAL_DB_PATH)
     cur = conn.cursor()
-    cur.execute("SELECT id, type, amount, tag FROM intake_logs ORDER BY logged_at DESC LIMIT 1")
-    row = cur.fetchone()
-    if not row:
+    cur.execute("SELECT id, type, amount, tag, logged_at FROM intake_logs ORDER BY logged_at DESC LIMIT 1")
+    row_i = cur.fetchone()
+    if row_i:
+        last_intake = {"id": row_i[0], "type": row_i[1], "amount": row_i[2], "tag": row_i[3], "logged_at": row_i[4]}
+
+    cur.execute("SELECT id, tag, logged_at FROM hygiene_logs ORDER BY logged_at DESC LIMIT 1")
+    row_h = cur.fetchone()
+    if row_h:
+        last_hygiene = {"id": row_h[0], "type": "hygiene", "amount": 1.0, "tag": row_h[1], "logged_at": row_h[2]}
+
+    t_i = _parse_timestamp(last_intake["logged_at"]) if last_intake else -1.0
+    t_h = _parse_timestamp(last_hygiene["logged_at"]) if last_hygiene else -1.0
+
+    if t_i < 0 and t_h < 0:
         conn.close()
         return None
-    latest = {"id": row[0], "type": row[1], "amount": row[2], "tag": row[3]}
-    cur.execute("DELETE FROM intake_logs WHERE id = ?", (latest["id"],))
+
+    target = last_intake if t_i >= t_h else last_hygiene
+    tbl = "intake_logs" if target["type"] != "hygiene" else "hygiene_logs"
+    cur.execute(f"DELETE FROM {tbl} WHERE id = ?", (target["id"],))
     conn.commit()
     conn.close()
-    return latest
+    return target
 
 
+# --- TOTALS & LAST TIMESTAMPS ---
 def get_today_totals() -> dict:
     local_now = time_manager.now()
     start_of_day_local = datetime.combine(local_now.date(), time.min, tzinfo=local_now.tzinfo)
@@ -222,14 +390,8 @@ def log_sleep(sleep_time: str, wake_time: str, interruptions: int = 0, notes: st
     return duration
 
 
-# --- ARCHIVES & TELEMETRY VIEWER (WITH WINDOW & ORDER TOGGLES) ---
+# --- ARCHIVES & TELEMETRY VIEWER ---
 def get_all_intake_history(limit: int = None, days: int = None, order: str = "desc") -> list:
-    """
-    Fetches intake logs.
-    - days: Filter by rolling days (e.g. 7). None fetches lifetime history.
-    - order: 'desc' (newest first) or 'asc' (oldest first).
-    - limit: Row limit. None fetches all matching records.
-    """
     descending = (order.lower() == "desc")
     cutoff_iso = None
     if days is not None:
@@ -270,12 +432,6 @@ def get_all_intake_history(limit: int = None, days: int = None, order: str = "de
 
 
 def get_all_sleep_history(limit: int = None, days: int = None, order: str = "desc") -> list:
-    """
-    Fetches sleep logs.
-    - days: Filter by rolling days (e.g. 7). None fetches lifetime history.
-    - order: 'desc' (newest first) or 'asc' (oldest first).
-    - limit: Row limit. None fetches all matching records.
-    """
     descending = (order.lower() == "desc")
     cutoff_str = None
     if days is not None:

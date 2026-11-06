@@ -2,15 +2,41 @@
 rvc_runtime/
 venv/
 env/
+ENV/
 __pycache__/
 *.pyc
 
-# Heavy AI weights & audio artifacts
+# Local Configs & Environment Secrets
+.env
+*.env
+pda_config.json
+config.json
+.vscode/
+
+# Local SQLite databases
+*.db
+*.sqlite
+*.sqlite3
+pda_local.db
+vitals.db
+
+# Heavy AI weights, pitch extractors & index files (>100MB)
+*.pt
+*.pth
+*.onnx
+*.onnx.json
+*.index
+rmvpe.pt*
 rvc_models/
-piper/models/
+piper/
+
+# Standalone CLI tools & binaries
+*.exe
+*.dll
+
+# Audio exports, logs & intermediate scratch files
 *.wav
 *.mp3
-
-# Editor / config files with local secrets
-.vscode/
-pda_config.json
+audio_cache/
+*.log
+ultron voice threshold*

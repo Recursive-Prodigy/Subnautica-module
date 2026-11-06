@@ -5,7 +5,7 @@ import threading
 from datetime import datetime, time, timezone, timedelta
 import pystray
 from PIL import Image, ImageDraw
-
+import os
 import database
 from hud_state import HUDState
 import dialogues
@@ -24,6 +24,47 @@ WARN_AMBER = "#ffaa00"
 ALERT_RED = "#ff3344"
 SUCCESS_GREEN = "#00ff88"
 
+# --- GLOBAL TIMEZONE CHOICES WITH GMT OFFSETS ---
+TIMEZONE_MAP = {
+    "Asia/Kolkata (GMT+05:30)": "Asia/Kolkata",
+    "UTC (GMT+00:00)": "UTC",
+    "Europe/London (GMT+00:00)": "Europe/London",
+    "Europe/Berlin (GMT+01:00)": "Europe/Berlin",
+    "Europe/Paris (GMT+01:00)": "Europe/Paris",
+    "Europe/Zurich (GMT+01:00)": "Europe/Zurich",
+    "Asia/Dubai (GMT+04:00)": "Asia/Dubai",
+    "Asia/Singapore (GMT+08:00)": "Asia/Singapore",
+    "Asia/Tokyo (GMT+09:00)": "Asia/Tokyo",
+    "Australia/Sydney (GMT+10:00)": "Australia/Sydney",
+    "America/New_York (GMT-05:00)": "America/New_York",
+    "America/Chicago (GMT-06:00)": "America/Chicago",
+    "America/Denver (GMT-07:00)": "America/Denver",
+    "America/Los_Angeles (GMT-08:00)": "America/Los_Angeles",
+}
+
+
+def format_date_dmy(date_val, include_time: bool = True) -> str:
+    """Transforms database ISO timestamps into clean DD/MM/YYYY presentation strings."""
+    if not date_val:
+        return "--"
+    clean_str = str(date_val).replace("T", " ").strip()
+    
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M:%S", "%Y/%m/%d %H:%M"):
+        try:
+            dt = datetime.strptime(clean_str[:19], fmt)
+            return dt.strftime("%d/%m/%Y %H:%M") if include_time else dt.strftime("%d/%m/%Y")
+        except ValueError:
+            pass
+
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d"):
+        try:
+            dt = datetime.strptime(clean_str[:10], fmt)
+            return dt.strftime("%d/%m/%Y")
+        except ValueError:
+            pass
+
+    return clean_str
+
 
 def create_tray_icon():
     """Generates a dynamic 64x64 Alterra cyan hexagon icon in memory."""
@@ -36,7 +77,7 @@ def create_tray_icon():
 
 
 class CircularHUDGauge(tk.Canvas):
-    def __init__(self, parent, size=135, ring_width=7, title="GAUGE", base_color=CYAN_BRIGHT, **kwargs):
+    def __init__(self, parent, size=120, ring_width=6, title="GAUGE", base_color=CYAN_BRIGHT, **kwargs):
         super().__init__(parent, width=size, height=size, bg=PANEL_BG, bd=0, highlightthickness=0, **kwargs)
         self.size = size
         self.ring_width = ring_width
@@ -101,17 +142,13 @@ class CircularHUDGauge(tk.Canvas):
         x0, y0 = self.cx - r, self.cy - r
         x1, y1 = self.cx + r, self.cy + r
 
-        # Background circular body
         self.create_oval(x0, y0, x1, y1, fill=fill_glow, outline="#0d2838", width=1)
-
-        # Unfilled track
         self.create_arc(
             x0, y0, x1, y1,
             start=90, extent=-359.9,
             style="arc", outline="#0a202d", width=self.ring_width
         )
 
-        # Progress sweep arc
         extent = -359.9 * self.fraction
         if abs(extent) > 1.0:
             self.create_arc(
@@ -120,18 +157,17 @@ class CircularHUDGauge(tk.Canvas):
                 style="arc", outline=stroke_color, width=self.ring_width
             )
 
-        # Center and sub readouts
         self.create_text(
             self.cx, self.cy - 12,
             text=self.title, fill="#527e8a", font=("Consolas", 8, "bold")
         )
         self.create_text(
-            self.cx, self.cy + 5,
-            text=self.center_text, fill=stroke_color, font=("Consolas", 10, "bold")
+            self.cx, self.cy + 4,
+            text=self.center_text, fill=stroke_color, font=("Consolas", 9, "bold")
         )
         self.create_text(
-            self.cx, self.cy + 22,
-            text=self.sub_text, fill="#7aa0ab", font=("Consolas", 8)
+            self.cx, self.cy + 20,
+            text=self.sub_text, fill="#7aa0ab", font=("Consolas", 7)
         )
 
 
@@ -159,7 +195,7 @@ class SubnauticaPDAGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("ALTERRA CORP // PERSONAL BIOMETRIC MONITOR (ARX-10)")
-        self.root.geometry("860x780")
+        self.root.geometry("860x880")
         self.root.configure(bg=BG_DARK)
         self.root.resizable(False, False)
 
@@ -184,14 +220,14 @@ class SubnauticaPDAGUI:
         self.poll_timers()
 
     def _build_header(self):
-        header_frame = tk.Frame(self.root, bg=BG_DARK, pady=10, padx=20)
+        header_frame = tk.Frame(self.root, bg=BG_DARK, pady=8, padx=20)
         header_frame.pack(fill="x")
         
         title_box = tk.Frame(header_frame, bg=BG_DARK)
         title_box.pack(side="left")
 
         tk.Label(title_box, text="ALTERRA CORPORATION", font=("Consolas", 10, "bold"), fg=CYAN_DIM, bg=BG_DARK).pack(anchor="w")
-        tk.Label(title_box, text="PDA REC-01 // BIOMETRIC HUD", font=("Consolas", 16, "bold"), fg=CYAN_BRIGHT, bg=BG_DARK).pack(anchor="w")
+        tk.Label(title_box, text="PDA REC-01 // BIOMETRIC HUD", font=("Consolas", 15, "bold"), fg=CYAN_BRIGHT, bg=BG_DARK).pack(anchor="w")
 
         right_box = tk.Frame(header_frame, bg=BG_DARK)
         right_box.pack(side="right", anchor="e")
@@ -207,118 +243,165 @@ class SubnauticaPDAGUI:
         btn_header_settings.pack(side="top", anchor="e")
 
         divider = tk.Frame(self.root, height=2, bg=CYAN_DIM)
-        divider.pack(fill="x", padx=15, pady=(10, 6))
+        divider.pack(fill="x", padx=15, pady=(8, 4))
 
     def _build_vitals_panel(self):
         panel_container = tk.Frame(self.root, bg=BG_DARK, padx=20)
         panel_container.pack(fill="x", pady=2)
 
-        # --- VIEW 1: CIRCULAR DECAY METERS ---
-        card_circles = tk.Frame(panel_container, bg=PANEL_BG, bd=1, relief="solid", highlightbackground=PANEL_BORDER, highlightthickness=1, padx=12, pady=10)
-        card_circles.pack(fill="x", pady=4)
+        # --- VIEW 1: STAGGERED INVERTED PYRAMID GAUGES ---
+        card_circles = tk.Frame(
+            panel_container, bg=PANEL_BG, bd=1, relief="solid",
+            highlightbackground=PANEL_BORDER, highlightthickness=1, padx=14, pady=8
+        )
+        card_circles.pack(fill="x", pady=3)
 
         c_header = tk.Frame(card_circles, bg=PANEL_BG)
         c_header.pack(fill="x", pady=(0, 4))
-        tk.Label(c_header, text="VITAL SIGNS INTERVAL TELEMETRY", font=("Consolas", 10, "bold"), fg=CYAN_DIM, bg=PANEL_BG).pack(side="left")
-        self.lbl_vitals_summary = tk.Label(c_header, text="ALL PARAMETERS NOMINAL", font=("Consolas", 9, "bold"), fg=SUCCESS_GREEN, bg=PANEL_BG)
+        tk.Label(
+            c_header, text="BIOMETRIC COMPLIANCE & INTERVAL TELEMETRY",
+            font=("Consolas", 9, "bold"), fg=CYAN_DIM, bg=PANEL_BG
+        ).pack(side="left")
+        self.lbl_vitals_summary = tk.Label(
+            c_header, text="ALL PARAMETERS NOMINAL",
+            font=("Consolas", 9, "bold"), fg=SUCCESS_GREEN, bg=PANEL_BG
+        )
         self.lbl_vitals_summary.pack(side="right")
 
-        gauges_row = tk.Frame(card_circles, bg=PANEL_BG)
-        gauges_row.pack(fill="x", expand=True, pady=2)
+        # 5-Column Symmetrical Grid for Staggered Valleys
+        gauges_grid = tk.Frame(card_circles, bg=PANEL_BG)
+        gauges_grid.pack(fill="x", expand=True, pady=2)
 
-        self.gauge_water = CircularHUDGauge(gauges_row, size=135, ring_width=7, title="WATER", base_color=CYAN_BRIGHT)
-        self.gauge_water.pack(side="left", expand=True)
+        for col_idx in range(5):
+            gauges_grid.columnconfigure(col_idx, weight=1)
 
-        self.gauge_food = CircularHUDGauge(gauges_row, size=135, ring_width=7, title="FOOD", base_color="#28d7a0")
-        self.gauge_food.pack(side="left", expand=True)
+        # --- TOP TIER: PRIMARY METABOLIC VITALS (Cols 0, 2, 4) ---
+        self.gauge_water = CircularHUDGauge(gauges_grid, size=116, ring_width=6, title="WATER", base_color=CYAN_BRIGHT)
+        self.gauge_water.grid(row=0, column=0, pady=2)
 
-        self.gauge_sleep = CircularHUDGauge(gauges_row, size=135, ring_width=7, title="REST", base_color="#b070ff")
-        self.gauge_sleep.pack(side="left", expand=True)
+        self.gauge_food = CircularHUDGauge(gauges_grid, size=116, ring_width=6, title="FOOD", base_color="#28d7a0")
+        self.gauge_food.grid(row=0, column=2, pady=2)
 
-        # --- VIEW 2: PROGRESS LINES ---
-        # Hydration Progress Bar
-        self.card_water = tk.Frame(panel_container, bg=PANEL_BG, bd=1, relief="solid", highlightbackground=PANEL_BORDER, highlightthickness=1, padx=15, pady=8)
-        self.card_water.pack(fill="x", pady=3)
+        self.gauge_sleep = CircularHUDGauge(gauges_grid, size=116, ring_width=6, title="REST", base_color="#b070ff")
+        self.gauge_sleep.grid(row=0, column=4, pady=2)
+
+        # --- SUBTLE HORIZONTAL SEPARATOR RULE ---
+        sep_frame = tk.Frame(gauges_grid, bg=PANEL_BG)
+        sep_frame.grid(row=1, column=0, columnspan=5, sticky="ew", pady=(6, 4))
+
+        tk.Frame(sep_frame, height=1, bg="#0e2838").pack(fill="x", padx=40)
+
+        # --- BOTTOM TIER: SECONDARY DECONTAMINATION (Cols 1, 3 - Inverted Pyramid Valleys) ---
+        self.gauge_brush = CircularHUDGauge(gauges_grid, size=110, ring_width=6, title="BRUSH", base_color="#00c8ff")
+        self.gauge_brush.grid(row=2, column=1, pady=2)
+
+        self.gauge_shower = CircularHUDGauge(gauges_grid, size=110, ring_width=6, title="SHOWER", base_color="#00e5a3")
+        self.gauge_shower.grid(row=2, column=3, pady=2)
+
+        # --- VIEW 2: LINEAR PROGRESS BARS ---
+        self.card_water = tk.Frame(panel_container, bg=PANEL_BG, bd=1, relief="solid", highlightbackground=PANEL_BORDER, highlightthickness=1, padx=12, pady=5)
+        self.card_water.pack(fill="x", pady=2)
         w_header = tk.Frame(self.card_water, bg=PANEL_BG)
         w_header.pack(fill="x")
-        tk.Label(w_header, text="HYDRATION INTEGRITY", font=("Consolas", 10, "bold"), fg=CYAN_BRIGHT, bg=PANEL_BG).pack(side="left")
-        self.lbl_water_status = tk.Label(w_header, text="OPTIMAL", font=("Consolas", 9, "bold"), fg=SUCCESS_GREEN, bg=PANEL_BG)
+        tk.Label(w_header, text="HYDRATION INTEGRITY", font=("Consolas", 9, "bold"), fg=CYAN_BRIGHT, bg=PANEL_BG).pack(side="left")
+        self.lbl_water_status = tk.Label(w_header, text="OPTIMAL", font=("Consolas", 8, "bold"), fg=SUCCESS_GREEN, bg=PANEL_BG)
         self.lbl_water_status.pack(side="right")
-        self.water_bar = AlterraProgressBar(self.card_water, width=780, height=12)
-        self.water_bar.pack(pady=5)
+        self.water_bar = AlterraProgressBar(self.card_water, width=780, height=9)
+        self.water_bar.pack(pady=2)
         w_stats = tk.Frame(self.card_water, bg=PANEL_BG)
         w_stats.pack(fill="x")
-        self.lbl_water_vals = tk.Label(w_stats, text="0 / 2500 ml (0%)", font=("Consolas", 9), fg=TEXT_LIGHT, bg=PANEL_BG)
+        self.lbl_water_vals = tk.Label(w_stats, text="0 / 2500 ml (0%)", font=("Consolas", 8), fg=TEXT_LIGHT, bg=PANEL_BG)
         self.lbl_water_vals.pack(side="left")
-        self.lbl_water_timer = tk.Label(w_stats, text="Last: Never | Interval: 75m", font=("Consolas", 9), fg=TEXT_MUTED, bg=PANEL_BG)
+        self.lbl_water_timer = tk.Label(w_stats, text="Last: Never | Interval: 75m", font=("Consolas", 8), fg=TEXT_MUTED, bg=PANEL_BG)
         self.lbl_water_timer.pack(side="right")
 
-        # Sustenance Progress Bar
-        self.card_food = tk.Frame(panel_container, bg=PANEL_BG, bd=1, relief="solid", highlightbackground=PANEL_BORDER, highlightthickness=1, padx=15, pady=8)
-        self.card_food.pack(fill="x", pady=3)
+        self.card_food = tk.Frame(panel_container, bg=PANEL_BG, bd=1, relief="solid", highlightbackground=PANEL_BORDER, highlightthickness=1, padx=12, pady=5)
+        self.card_food.pack(fill="x", pady=2)
         f_header = tk.Frame(self.card_food, bg=PANEL_BG)
         f_header.pack(fill="x")
-        tk.Label(f_header, text="SUSTENANCE & METABOLISM", font=("Consolas", 10, "bold"), fg=CYAN_BRIGHT, bg=PANEL_BG).pack(side="left")
-        self.lbl_food_status = tk.Label(f_header, text="OPTIMAL", font=("Consolas", 9, "bold"), fg=SUCCESS_GREEN, bg=PANEL_BG)
+        tk.Label(f_header, text="SUSTENANCE & METABOLISM", font=("Consolas", 9, "bold"), fg=CYAN_BRIGHT, bg=PANEL_BG).pack(side="left")
+        self.lbl_food_status = tk.Label(f_header, text="OPTIMAL", font=("Consolas", 8, "bold"), fg=SUCCESS_GREEN, bg=PANEL_BG)
         self.lbl_food_status.pack(side="right")
-        self.food_bar = AlterraProgressBar(self.card_food, width=780, height=12)
-        self.food_bar.pack(pady=5)
+        self.food_bar = AlterraProgressBar(self.card_food, width=780, height=9)
+        self.food_bar.pack(pady=2)
         f_stats = tk.Frame(self.card_food, bg=PANEL_BG)
         f_stats.pack(fill="x")
-        self.lbl_food_vals = tk.Label(f_stats, text="0 / 4 Meals (0%)", font=("Consolas", 9), fg=TEXT_LIGHT, bg=PANEL_BG)
+        self.lbl_food_vals = tk.Label(f_stats, text="0 / 4 Meals (0%)", font=("Consolas", 8), fg=TEXT_LIGHT, bg=PANEL_BG)
         self.lbl_food_vals.pack(side="left")
-        self.lbl_food_timer = tk.Label(f_stats, text="Last: Never | Interval: 210m", font=("Consolas", 9), fg=TEXT_MUTED, bg=PANEL_BG)
+        self.lbl_food_timer = tk.Label(f_stats, text="Last: Never | Interval: 210m", font=("Consolas", 8), fg=TEXT_MUTED, bg=PANEL_BG)
         self.lbl_food_timer.pack(side="right")
 
     def _build_action_deck(self):
-        deck_frame = tk.Frame(self.root, bg=BG_DARK, padx=20, pady=4)
+        deck_frame = tk.Frame(self.root, bg=BG_DARK, padx=20, pady=2)
         deck_frame.pack(fill="x")
 
+        # Row 1: Primary Metabolism Logs
+        row1 = tk.Frame(deck_frame, bg=BG_DARK)
+        row1.pack(fill="x", pady=2)
+
         btn_water = tk.Button(
-            deck_frame, text="+ LOG HYDRATION (250ml)", font=("Consolas", 10, "bold"),
+            row1, text="+ LOG HYDRATION (250ml)", font=("Consolas", 9, "bold"),
             bg="#0e2838", fg=CYAN_BRIGHT, activebackground=CYAN_DIM, activeforeground="#ffffff",
-            bd=1, relief="ridge", padx=10, pady=8, cursor="hand2", command=self.action_log_water
+            bd=1, relief="ridge", padx=8, pady=6, cursor="hand2", command=self.action_log_water
         )
-        btn_water.pack(side="left", expand=True, fill="x", padx=3)
+        btn_water.pack(side="left", expand=True, fill="x", padx=2)
 
         btn_meal = tk.Button(
-            deck_frame, text="+ LOG SUSTENANCE MEAL", font=("Consolas", 10, "bold"),
+            row1, text="+ LOG SUSTENANCE MEAL", font=("Consolas", 9, "bold"),
             bg="#0e2838", fg=CYAN_BRIGHT, activebackground=CYAN_DIM, activeforeground="#ffffff",
-            bd=1, relief="ridge", padx=10, pady=8, cursor="hand2", command=self.action_log_meal
+            bd=1, relief="ridge", padx=8, pady=6, cursor="hand2", command=self.action_log_meal
         )
-        btn_meal.pack(side="left", expand=True, fill="x", padx=3)
+        btn_meal.pack(side="left", expand=True, fill="x", padx=2)
 
         btn_sleep = tk.Button(
-            deck_frame, text="+ LOG SLEEP CYCLE", font=("Consolas", 10, "bold"),
+            row1, text="+ LOG SLEEP CYCLE", font=("Consolas", 9, "bold"),
             bg="#0e2838", fg=CYAN_BRIGHT, activebackground=CYAN_DIM, activeforeground="#ffffff",
-            bd=1, relief="ridge", padx=10, pady=8, cursor="hand2", command=self.action_log_sleep_dialog
+            bd=1, relief="ridge", padx=8, pady=6, cursor="hand2", command=self.action_log_sleep_dialog
         )
-        btn_sleep.pack(side="left", expand=True, fill="x", padx=3)
+        btn_sleep.pack(side="left", expand=True, fill="x", padx=2)
+
+        # Row 2: Hygiene Protocols & Archive Controls
+        row2 = tk.Frame(deck_frame, bg=BG_DARK)
+        row2.pack(fill="x", pady=2)
+
+        btn_brush = tk.Button(
+            row2, text="🪥 LOG BRUSHING", font=("Consolas", 9, "bold"),
+            bg="#082230", fg="#00c8ff", activebackground=CYAN_DIM, activeforeground="#ffffff",
+            bd=1, relief="ridge", padx=8, pady=6, cursor="hand2", command=self.action_log_brush
+        )
+        btn_brush.pack(side="left", expand=True, fill="x", padx=2)
+
+        btn_shower = tk.Button(
+            row2, text="🚿 LOG SHOWER", font=("Consolas", 9, "bold"),
+            bg="#08222a", fg="#00e5a3", activebackground=CYAN_DIM, activeforeground="#ffffff",
+            bd=1, relief="ridge", padx=8, pady=6, cursor="hand2", command=self.action_log_shower
+        )
+        btn_shower.pack(side="left", expand=True, fill="x", padx=2)
 
         btn_undo = tk.Button(
-            deck_frame, text="↺ UNDO LAST", font=("Consolas", 10, "bold"),
+            row2, text="↺ UNDO LAST", font=("Consolas", 9, "bold"),
             bg="#211014", fg="#ff4455", activebackground="#38151c", activeforeground="#ffffff",
-            bd=1, relief="ridge", padx=10, pady=8, cursor="hand2", command=self.action_undo_intake
+            bd=1, relief="ridge", padx=10, pady=6, cursor="hand2", command=self.action_undo_intake
         )
-        btn_undo.pack(side="left", expand=False, padx=3)
+        btn_undo.pack(side="left", expand=False, padx=2)
 
         btn_archives = tk.Button(
-            deck_frame, text="📊 ARCHIVES", font=("Consolas", 10, "bold"),
+            row2, text="📊 ARCHIVES", font=("Consolas", 9, "bold"),
             bg="#0e2838", fg=CYAN_BRIGHT, activebackground=CYAN_DIM, activeforeground="#ffffff",
-            bd=1, relief="ridge", padx=10, pady=8, cursor="hand2", command=self.action_view_archives
+            bd=1, relief="ridge", padx=10, pady=6, cursor="hand2", command=self.action_view_archives
         )
-        btn_archives.pack(side="left", expand=False, padx=3)
+        btn_archives.pack(side="left", expand=False, padx=2)
 
     def _build_telemetry_terminal(self):
-        term_frame = tk.Frame(self.root, bg=BG_DARK, padx=20, pady=6)
+        term_frame = tk.Frame(self.root, bg=BG_DARK, padx=20, pady=4)
         term_frame.pack(fill="both", expand=True)
 
-        tk.Label(term_frame, text="PDA LOG PROTOCOL OUTPUT", font=("Consolas", 9, "bold"), fg=CYAN_DIM, bg=BG_DARK).pack(anchor="w")
+        tk.Label(term_frame, text="PDA LOG PROTOCOL OUTPUT", font=("Consolas", 8, "bold"), fg=CYAN_DIM, bg=BG_DARK).pack(anchor="w")
 
         self.terminal = tk.Text(
             term_frame, bg="#02070b", fg=TEXT_LIGHT, insertbackground=CYAN_BRIGHT,
-            font=("Consolas", 9), height=6, bd=1, relief="solid", highlightthickness=1,
-            highlightbackground=PANEL_BORDER, padx=10, pady=6
+            font=("Consolas", 9), height=5, bd=1, relief="solid", highlightthickness=1,
+            highlightbackground=PANEL_BORDER, padx=8, pady=4
         )
         self.terminal.pack(fill="both", expand=True)
         self.log_terminal("Alterra ARX-10 Operating System Initialized.")
@@ -330,6 +413,7 @@ class SubnauticaPDAGUI:
         self.terminal.see("end")
 
     def refresh_display(self):
+        cfg = config_manager.load_config() or config_manager.DEFAULT_CONFIG
         totals = database.get_today_totals()
         h_status, h_min = self.hud.evaluate_hydration()
         n_status, n_min = self.hud.evaluate_nutrition()
@@ -340,26 +424,19 @@ class SubnauticaPDAGUI:
         m_tgt = self.hud.target_meals
 
         # --- 1. CIRCULAR DECAY GAUGES ---
+        # Water
         h_interval = self.hud.hydration_interval_min
         w_frac = max(0.0, 1.0 - (h_min / h_interval)) if h_min != 999 else 0.0
         w_sub = f"{max(0, h_interval - h_min)}m left" if h_min < h_interval else f"+{h_min - h_interval}m over"
-        self.gauge_water.set_data(
-            fraction=w_frac,
-            center_val=f"{int(w_ml)}ml",
-            sub_val=w_sub,
-            status=h_status
-        )
+        self.gauge_water.set_data(fraction=w_frac, center_val=f"{int(w_ml)}ml", sub_val=w_sub, status=h_status)
 
+        # Food
         m_interval = self.hud.meal_interval_min
         n_frac = max(0.0, 1.0 - (n_min / m_interval)) if n_min != 999 else 0.0
         n_sub = f"{max(0, m_interval - n_min)}m left" if n_min < m_interval else f"+{n_min - m_interval}m over"
-        self.gauge_food.set_data(
-            fraction=n_frac,
-            center_val=f"{m_cnt}/{m_tgt}",
-            sub_val=n_sub,
-            status=n_status
-        )
+        self.gauge_food.set_data(fraction=n_frac, center_val=f"{m_cnt}/{m_tgt}", sub_val=n_sub, status=n_status)
 
+        # Sleep
         sleep_history = database.get_all_sleep_history(limit=1)
         if sleep_history:
             last_wake_str = sleep_history[0].get("wake_time", "")
@@ -373,23 +450,65 @@ class SubnauticaPDAGUI:
 
         alertness_frac = max(0.0, min(1.0, 1.0 - (hours_awake / 16.0)))
         s_status = "OPTIMAL" if hours_awake < 14.0 else ("DUE" if hours_awake < 17.0 else "OVERDUE")
-        s_sub = f"{hours_awake:.1f}h awake"
-        self.gauge_sleep.set_data(
-            fraction=alertness_frac,
-            center_val=f"{int(alertness_frac * 100)}%",
-            sub_val=s_sub,
-            status=s_status
-        )
+        self.gauge_sleep.set_data(fraction=alertness_frac, center_val=f"{int(alertness_frac * 100)}%", sub_val=f"{hours_awake:.1f}h awake", status=s_status)
+
+        # --- 2. HYGIENE GAUGES (BRUSH & SHOWER) ---
+        target_brush = int(cfg.get("target_brushing", 2))
+        shower_freq = cfg.get("shower_frequency", "Daily")
+
+        # Brushing
+        try:
+            b_cnt = database.get_hygiene_today_count("brushing")
+        except AttributeError:
+            intakes = database.get_today_intakes()
+            b_cnt = sum(1 for r in intakes if r.get("tag") == "brushing")
+
+        b_frac = min(1.0, b_cnt / target_brush if target_brush > 0 else 1.0)
+        b_status = "OPTIMAL" if b_cnt >= target_brush else "DUE"
+        b_sub = "COMPLIANT" if b_cnt >= target_brush else f"{target_brush - b_cnt} DUE"
+        self.gauge_brush.set_data(fraction=b_frac, center_val=f"{b_cnt}/{target_brush}", sub_val=b_sub, status=b_status)
+
+        # Shower
+        try:
+            last_shower_str = database.get_last_hygiene_time("shower")
+        except AttributeError:
+            intakes = database.get_all_intake_history(days=None, order="desc")
+            last_shower_str = next((r.get("logged_at") for r in intakes if r.get("tag") == "shower"), None)
+
+        if not last_shower_str:
+            sh_days_ago = 999
+        else:
+            try:
+                dt_sh = datetime.strptime(str(last_shower_str)[:10], "%Y-%m-%d")
+                sh_days_ago = (datetime.now().date() - dt_sh.date()).days
+            except Exception:
+                sh_days_ago = 999
+
+        if shower_freq == "Daily":
+            sh_ok = (sh_days_ago == 0)
+            sh_frac = 1.0 if sh_ok else 0.0
+            sh_center = "1/1" if sh_ok else "0/1"
+            sh_sub = "COMPLIANT" if sh_ok else "DUE TODAY"
+            sh_status = "OPTIMAL" if sh_ok else "DUE"
+        else:
+            # Every 2 / alternative Day
+            sh_ok = (sh_days_ago <= 1)
+            sh_frac = 1.0 if sh_ok else 0.0
+            sh_center = "DONE" if sh_days_ago == 0 else ("NOMINAL" if sh_days_ago == 1 else "DUE")
+            sh_sub = "TODAY" if sh_days_ago == 0 else ("1d AGO" if sh_days_ago == 1 else f"{sh_days_ago}d AGO")
+            sh_status = "OPTIMAL" if sh_ok else "DUE"
+
+        self.gauge_shower.set_data(fraction=sh_frac, center_val=sh_center, sub_val=sh_sub, status=sh_status)
 
         # Overall summary indicator
         if "OVERDUE" in (h_status, n_status, s_status):
             self.lbl_vitals_summary.config(text="CRITICAL BIOLOGICAL DEFICIT", fg=ALERT_RED)
-        elif "DUE" in (h_status, n_status, s_status):
+        elif "DUE" in (h_status, n_status, s_status, b_status, sh_status):
             self.lbl_vitals_summary.config(text="MAINTENANCE INTERVAL REQUIRED", fg=WARN_AMBER)
         else:
             self.lbl_vitals_summary.config(text="ALL PARAMETERS NOMINAL", fg=SUCCESS_GREEN)
 
-        # --- 2. LINEAR PROGRESS BARS ---
+        # --- Linear Progress Bars ---
         w_pct = int((w_ml / w_tgt) * 100) if w_tgt else 0
         self.lbl_water_vals.config(text=f"{int(w_ml)} / {w_tgt} ml ({w_pct}%)")
         self.lbl_water_status.config(text=h_status)
@@ -420,23 +539,39 @@ class SubnauticaPDAGUI:
             h_status, _ = self.hud.evaluate_hydration()
             n_status, _ = self.hud.evaluate_nutrition()
 
-            if h_status in ["DUE", "OVERDUE"] and self._last_h_alert != h_status:
-                self._last_h_alert = h_status
-                cat = "hydration_overdue" if h_status == "OVERDUE" else "hydration_due"
-                line = dialogues.get_dialogue(cat)
-                self.log_terminal(f"TELEMETRY ALERT: {line}")
-                threading.Thread(target=speak, args=(line, "pda"), daemon=True).start()
-            elif h_status == "OPTIMAL":
-                self._last_h_alert = None
+            # --- HYDRATION PROTOCOL ---
+            if h_status != self._last_h_alert:
+                if h_status == "OVERDUE":
+                    # Critical Override: Ultron Speaks
+                    line = dialogues.get_ultron_dialogue("hydration_critical")
+                    self.log_terminal(f"CRITICAL OVERRIDE: {line}")
+                    threading.Thread(target=speak, args=(line, "ultron"), daemon=True).start()
+                    self._last_h_alert = h_status
+                elif h_status == "DUE":
+                    # Gentle Alert: Alterra PDA Speaks
+                    line = dialogues.get_dialogue("hydration_due")
+                    self.log_terminal(f"TELEMETRY ALERT: {line}")
+                    threading.Thread(target=speak, args=(line, "pda"), daemon=True).start()
+                    self._last_h_alert = h_status
+                elif h_status == "OPTIMAL":
+                    self._last_h_alert = None
 
-            if n_status in ["DUE", "OVERDUE"] and self._last_n_alert != n_status:
-                self._last_n_alert = n_status
-                cat = "meal_overdue" if n_status == "OVERDUE" else "meal_due"
-                line = dialogues.get_dialogue(cat)
-                self.log_terminal(f"TELEMETRY ALERT: {line}")
-                threading.Thread(target=speak, args=(line, "pda"), daemon=True).start()
-            elif n_status == "OPTIMAL":
-                self._last_n_alert = None
+            # --- NUTRITION PROTOCOL ---
+            if n_status != self._last_n_alert:
+                if n_status == "OVERDUE":
+                    # Critical Override: Ultron Speaks
+                    line = dialogues.get_ultron_dialogue("meal_critical")
+                    self.log_terminal(f"CRITICAL OVERRIDE: {line}")
+                    threading.Thread(target=speak, args=(line, "ultron"), daemon=True).start()
+                    self._last_n_alert = n_status
+                elif n_status == "DUE":
+                    # Gentle Alert: Alterra PDA Speaks
+                    line = dialogues.get_dialogue("meal_due")
+                    self.log_terminal(f"TELEMETRY ALERT: {line}")
+                    threading.Thread(target=speak, args=(line, "pda"), daemon=True).start()
+                    self._last_n_alert = n_status
+                elif n_status == "OPTIMAL":
+                    self._last_n_alert = None
 
         self.root.after(60000, self.poll_timers)
 
@@ -445,6 +580,8 @@ class SubnauticaPDAGUI:
             pystray.MenuItem("Open Alterra HUD", self.show_from_tray, default=True),
             pystray.MenuItem("+ Log Water (250ml)", lambda: self.root.after(0, self.action_log_water)),
             pystray.MenuItem("+ Log Sustenance Meal", lambda: self.root.after(0, self.action_log_meal)),
+            pystray.MenuItem("🪥 Log Brushing", lambda: self.root.after(0, self.action_log_brush)),
+            pystray.MenuItem("🚿 Log Shower", lambda: self.root.after(0, self.action_log_shower)),
             pystray.MenuItem("↺ Undo Last Entry", lambda: self.root.after(0, self.action_undo_intake)),
             pystray.MenuItem("📊 View Telemetry Archives", lambda: self.root.after(0, self.action_view_archives)),
             pystray.MenuItem("⚙ Settings & Bio-Parameters", lambda: self.root.after(0, self.action_settings_dialog)),
@@ -474,9 +611,29 @@ class SubnauticaPDAGUI:
     def quit_application(self, icon=None, item=None):
         if self.tray_icon:
             self.tray_icon.stop()
-        shutdown_msg = dialogues.SHUTDOWN
-        threading.Thread(target=speak, args=(shutdown_msg, "pda"), daemon=False).start()
-        self.root.after(600, self.root.destroy)
+
+        # If shutting down during sleep window, fire Ultron Nightwatch as a detached process
+        if self.hud.is_sleep_window():
+            import subprocess
+            nightwatch_script = os.path.join(os.path.dirname(__file__), "ultron_nightwatch.py")
+            py_exe = sys.executable
+
+            DETACHED_PROCESS = 0x00000008
+            CREATE_NEW_PROCESS_GROUP = 0x00000200
+
+            subprocess.Popen(
+                [py_exe, nightwatch_script],
+                creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
+                close_fds=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            self.root.destroy()
+        else:
+            # Daytime shutdown: Play Alterra British farewell
+            shutdown_msg = dialogues.SHUTDOWN
+            threading.Thread(target=speak, args=(shutdown_msg, "pda"), daemon=False).start()
+            self.root.after(700, self.root.destroy)
 
     def action_log_water(self):
         amount = 250.0
@@ -495,6 +652,26 @@ class SubnauticaPDAGUI:
         self.refresh_display()
         threading.Thread(target=speak, args=(line, "pda"), daemon=True).start()
 
+    def action_log_brush(self):
+        try:
+            database.log_hygiene("brushing")
+        except AttributeError:
+            database.log_intake("hygiene", 1.0, "brushing")
+        self.log_terminal("HYGIENE LOGGED: Oral cavity sanitized.")
+        self.refresh_display()
+        line = "Oral hygiene protocol acknowledged. Dental degradation vectors mitigated."
+        threading.Thread(target=speak, args=(line, "pda"), daemon=True).start()
+
+    def action_log_shower(self):
+        try:
+            database.log_hygiene("shower")
+        except AttributeError:
+            database.log_intake("hygiene", 1.0, "shower")
+        self.log_terminal("HYGIENE LOGGED: Full dermal decontamination cycle complete.")
+        self.refresh_display()
+        line = "Dermal decontamination confirmed. External bio-contaminant levels normalized."
+        threading.Thread(target=speak, args=(line, "pda"), daemon=True).start()
+
     def action_undo_intake(self):
         deleted = database.undo_last_intake()
         if not deleted:
@@ -505,11 +682,18 @@ class SubnauticaPDAGUI:
         amt = deleted.get("amount", 0)
         tag = deleted.get("tag", "")
 
-        msg = f"Purged {int(amt)}ml water" if i_type == "hydration" else f"Purged meal entry ({tag})"
+        if i_type == "hydration":
+            msg = f"Purged {int(amt)}ml water"
+        elif i_type == "hygiene":
+            msg = f"Purged hygiene protocol: {tag}"
+        else:
+            msg = f"Purged meal entry ({tag})"
+
         self.log_terminal(f"TELEMETRY ROLLBACK: {msg}")
         self.refresh_display()
 
-        line = dialogues.get_intake_retracted_line()
+        # Context-aware Alterra voice line
+        line = dialogues.get_rollback_line(i_type, tag)
         threading.Thread(target=speak, args=(line, "pda"), daemon=True).start()
 
     def action_log_sleep_dialog(self):
@@ -530,13 +714,14 @@ class SubnauticaPDAGUI:
         grid_frame = tk.Frame(win, bg=PANEL_BG)
         grid_frame.pack(padx=20, fill="x", pady=5)
 
-        tk.Label(grid_frame, text="Wake Date (YYYY-MM-DD):", font=("Consolas", 9), fg=TEXT_LIGHT, bg=PANEL_BG).grid(row=0, column=0, sticky="w", pady=6)
-        entry_date = tk.Entry(grid_frame, bg="#02070b", fg=CYAN_BRIGHT, font=("Consolas", 9), width=15)
-        entry_date.insert(0, current_dt.strftime("%Y-%m-%d"))
+        # Visible blinking cursor via insertbackground & insertwidth
+        tk.Label(grid_frame, text="Wake Date (DD/MM/YYYY):", font=("Consolas", 9), fg=TEXT_LIGHT, bg=PANEL_BG).grid(row=0, column=0, sticky="w", pady=6)
+        entry_date = tk.Entry(grid_frame, bg="#02070b", fg=CYAN_BRIGHT, insertbackground=CYAN_BRIGHT, insertwidth=2, font=("Consolas", 9), width=15)
+        entry_date.insert(0, current_dt.strftime("%d/%m/%Y"))
         entry_date.grid(row=0, column=1, columnspan=2, sticky="w", pady=6, padx=5)
 
         tk.Label(grid_frame, text="Sleep Time (HH:MM):", font=("Consolas", 9), fg=TEXT_LIGHT, bg=PANEL_BG).grid(row=1, column=0, sticky="w", pady=6)
-        entry_s_time = tk.Entry(grid_frame, bg="#02070b", fg=CYAN_BRIGHT, font=("Consolas", 9), width=8)
+        entry_s_time = tk.Entry(grid_frame, bg="#02070b", fg=CYAN_BRIGHT, insertbackground=CYAN_BRIGHT, insertwidth=2, font=("Consolas", 9), width=8)
         entry_s_time.insert(0, "11:30")
         entry_s_time.grid(row=1, column=1, sticky="w", pady=6, padx=5)
         combo_s_ampm = ttk.Combobox(grid_frame, values=["PM", "AM"], width=4, state="readonly")
@@ -544,7 +729,7 @@ class SubnauticaPDAGUI:
         combo_s_ampm.grid(row=1, column=2, sticky="w", pady=6)
 
         tk.Label(grid_frame, text="Wake Time (HH:MM):", font=("Consolas", 9), fg=TEXT_LIGHT, bg=PANEL_BG).grid(row=2, column=0, sticky="w", pady=6)
-        entry_w_time = tk.Entry(grid_frame, bg="#02070b", fg=CYAN_BRIGHT, font=("Consolas", 9), width=8)
+        entry_w_time = tk.Entry(grid_frame, bg="#02070b", fg=CYAN_BRIGHT, insertbackground=CYAN_BRIGHT, insertwidth=2, font=("Consolas", 9), width=8)
         entry_w_time.insert(0, current_dt.strftime("%I:%M").strip().lstrip("0") or "7:00")
         entry_w_time.grid(row=2, column=1, sticky="w", pady=6, padx=5)
         combo_w_ampm = ttk.Combobox(grid_frame, values=["AM", "PM"], width=4, state="readonly")
@@ -552,7 +737,7 @@ class SubnauticaPDAGUI:
         combo_w_ampm.grid(row=2, column=2, sticky="w", pady=6)
 
         tk.Label(grid_frame, text="Disruptions:", font=("Consolas", 9), fg=TEXT_LIGHT, bg=PANEL_BG).grid(row=3, column=0, sticky="w", pady=6)
-        entry_dis = tk.Entry(grid_frame, bg="#02070b", fg=CYAN_BRIGHT, font=("Consolas", 9), width=8)
+        entry_dis = tk.Entry(grid_frame, bg="#02070b", fg=CYAN_BRIGHT, insertbackground=CYAN_BRIGHT, insertwidth=2, font=("Consolas", 9), width=8)
         entry_dis.insert(0, "0")
         entry_dis.grid(row=3, column=1, sticky="w", pady=6, padx=5)
 
@@ -573,7 +758,16 @@ class SubnauticaPDAGUI:
         def save_and_close():
             try:
                 d_str = entry_date.get().strip()
-                wake_date = datetime.strptime(d_str, "%Y-%m-%d")
+                wake_date = None
+                for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%Y/%m/%d"):
+                    try:
+                        wake_date = datetime.strptime(d_str, fmt)
+                        break
+                    except ValueError:
+                        pass
+                
+                if not wake_date:
+                    raise ValueError("Date format must be DD/MM/YYYY")
 
                 s_hr, s_mn = parse_time_component(entry_s_time.get(), combo_s_ampm.get())
                 w_hr, w_mn = parse_time_component(entry_w_time.get(), combo_w_ampm.get())
@@ -650,10 +844,38 @@ class SubnauticaPDAGUI:
         lbl_scope_status.pack(side="right", padx=5)
 
         style = ttk.Style()
-        style.theme_use("default")
+        if "clam" in style.theme_names():
+            style.theme_use("clam")
+
         style.configure("TNotebook", background=PANEL_BG, borderwidth=0)
         style.configure("TNotebook.Tab", background="#0c202d", foreground=TEXT_LIGHT, font=("Consolas", 10, "bold"), padding=[12, 5])
         style.map("TNotebook.Tab", background=[("selected", CYAN_DIM)], foreground=[("selected", "#ffffff")])
+
+        style.configure(
+            "PDA.Treeview",
+            background="#081620",
+            foreground=TEXT_LIGHT,
+            fieldbackground="#040b11",
+            rowheight=26,
+            font=("Consolas", 9),
+            borderwidth=0
+        )
+        style.configure(
+            "PDA.Treeview.Heading",
+            background="#0e2838",
+            foreground=CYAN_BRIGHT,
+            relief="flat",
+            font=("Consolas", 9, "bold")
+        )
+        style.map(
+            "PDA.Treeview",
+            background=[("selected", "#14374a")],
+            foreground=[("selected", "#ffffff")]
+        )
+        style.map(
+            "PDA.Treeview.Heading",
+            background=[("active", "#19435b")]
+        )
 
         notebook = ttk.Notebook(win)
         notebook.pack(fill="both", expand=True, padx=12, pady=(4, 5))
@@ -663,39 +885,39 @@ class SubnauticaPDAGUI:
         notebook.add(tab_sleep, text="SLEEP TELEMETRY")
 
         s_cols = ("id", "sleep_time", "wake_time", "duration", "disruptions", "notes")
-        tree_sleep = ttk.Treeview(tab_sleep, columns=s_cols, show="headings", height=13)
+        tree_sleep = ttk.Treeview(tab_sleep, columns=s_cols, show="headings", height=13, style="PDA.Treeview")
         tree_sleep.heading("id", text="ID")
-        tree_sleep.heading("sleep_time", text="Sleep Onset")
-        tree_sleep.heading("wake_time", text="Wake Time")
+        tree_sleep.heading("sleep_time", text="Sleep Onset (DD/MM/YYYY)")
+        tree_sleep.heading("wake_time", text="Wake Time (DD/MM/YYYY)")
         tree_sleep.heading("duration", text="Duration (h)")
         tree_sleep.heading("disruptions", text="Disruptions")
         tree_sleep.heading("notes", text="Diagnostic Notes")
 
         tree_sleep.column("id", width=50, anchor="center")
-        tree_sleep.column("sleep_time", width=140, anchor="center")
-        tree_sleep.column("wake_time", width=140, anchor="center")
+        tree_sleep.column("sleep_time", width=160, anchor="center")
+        tree_sleep.column("wake_time", width=160, anchor="center")
         tree_sleep.column("duration", width=90, anchor="center")
         tree_sleep.column("disruptions", width=90, anchor="center")
         tree_sleep.column("notes", width=220, anchor="w")
         tree_sleep.pack(fill="both", expand=True, padx=8, pady=8)
 
-        # TAB 2: INTAKE LOGS
+        # TAB 2: INTAKE & HYGIENE LOGS
         tab_intake = tk.Frame(notebook, bg=PANEL_BG)
-        notebook.add(tab_intake, text="INTAKE TELEMETRY")
+        notebook.add(tab_intake, text="INTAKE & HYGIENE")
 
         i_cols = ("id", "type", "amount", "tag", "logged_at")
-        tree_intake = ttk.Treeview(tab_intake, columns=i_cols, show="headings", height=13)
+        tree_intake = ttk.Treeview(tab_intake, columns=i_cols, show="headings", height=13, style="PDA.Treeview")
         tree_intake.heading("id", text="ID")
         tree_intake.heading("type", text="Type")
         tree_intake.heading("amount", text="Amount")
         tree_intake.heading("tag", text="Description")
-        tree_intake.heading("logged_at", text="Timestamp (UTC)")
+        tree_intake.heading("logged_at", text="Timestamp (DD/MM/YYYY)")
 
         tree_intake.column("id", width=50, anchor="center")
         tree_intake.column("type", width=90, anchor="center")
         tree_intake.column("amount", width=80, anchor="center")
         tree_intake.column("tag", width=160, anchor="w")
-        tree_intake.column("logged_at", width=200, anchor="center")
+        tree_intake.column("logged_at", width=180, anchor="center")
         tree_intake.pack(fill="both", expand=True, padx=8, pady=8)
 
         # TAB 3: LIFETIME TELEMETRY OVERVIEW
@@ -716,8 +938,8 @@ class SubnauticaPDAGUI:
             for r in sleep_data:
                 tree_sleep.insert("", "end", values=(
                     r.get("id"),
-                    r.get("sleep_time"),
-                    r.get("wake_time"),
+                    format_date_dmy(r.get("sleep_time")),
+                    format_date_dmy(r.get("wake_time")),
                     f"{r.get('duration_hours', 0.0):.1f}",
                     r.get("interruptions", 0),
                     r.get("quality_notes", "")
@@ -728,23 +950,30 @@ class SubnauticaPDAGUI:
                 tree_intake.delete(row)
             intake_data = database.get_all_intake_history(days=archive_scope["days"], order="desc")
             for r in intake_data:
-                amt_str = f"{int(r.get('amount', 0))}ml" if r.get("type") == "hydration" else f"{r.get('amount', 1)} meal"
+                t = r.get("type", "")
+                if t == "hydration":
+                    amt_str = f"{int(r.get('amount', 0))}ml"
+                elif t == "hygiene":
+                    amt_str = "Completed"
+                else:
+                    amt_str = f"{r.get('amount', 1)} meal"
                 tree_intake.insert("", "end", values=(
                     r.get("id"),
-                    r.get("type", "").upper(),
+                    t.upper(),
                     amt_str,
                     r.get("tag", ""),
-                    str(r.get("logged_at", ""))[:19].replace("T", " ")
+                    format_date_dmy(r.get("logged_at"))
                 ))
 
         def populate_lifetime():
             import analytics_engine
             data = analytics_engine.get_lifetime_summary()
+            first_day_dmy = format_date_dmy(data.get('first_day', ''), include_time=False)
             report = (
                 "==========================================================\n"
                 "       ALTERRA CORP // LIFETIME TELEMETRY ARCHIVE         \n"
                 "==========================================================\n\n"
-                f"  * Telemetry Genesis:          {data['first_day']}\n"
+                f"  * Telemetry Genesis:          {first_day_dmy}\n"
                 f"  * Total Active Days Monitored:{data['days_logged']} cycles\n\n"
                 "  [ HYDRATION COMPLIANCE ]\n"
                 f"  * Total Volume Assimilated:   {int(data['total_water_ml'])} ml\n"
@@ -831,110 +1060,131 @@ class SubnauticaPDAGUI:
 
         win = tk.Toplevel(self.root)
         win.title("ALTERRA CORP // BIO-PARAMETERS & SYSTEM CONFIGURATION")
-        win.geometry("560x640")
+        win.geometry("580x780")
         win.configure(bg=PANEL_BG)
         win.resizable(False, False)
 
-        header = tk.Frame(win, bg=PANEL_BG, padx=16, pady=10)
+        header = tk.Frame(win, bg=PANEL_BG, padx=16, pady=8)
         header.pack(fill="x")
         tk.Label(header, text="ALTERRA PROTOCOL CONFIGURATION CONSOLE", font=("Consolas", 11, "bold"), fg=CYAN_BRIGHT, bg=PANEL_BG).pack(anchor="w")
         tk.Label(header, text="Adjust physiological targets, sleep exclusion windows, and persistence.", font=("Consolas", 8), fg=TEXT_MUTED, bg=PANEL_BG).pack(anchor="w")
 
-        body = tk.Frame(win, bg=PANEL_BG, padx=16, pady=6)
+        body = tk.Frame(win, bg=PANEL_BG, padx=16, pady=4)
         body.pack(fill="both", expand=True)
 
         row = 0
         def add_section(text):
             nonlocal row
             lbl = tk.Label(body, text=f"--- {text} ---", font=("Consolas", 9, "bold"), fg=CYAN_DIM, bg=PANEL_BG)
-            lbl.grid(row=row, column=0, columnspan=2, sticky="w", pady=(10, 4))
+            lbl.grid(row=row, column=0, columnspan=2, sticky="w", pady=(8, 3))
             row += 1
 
-        # 1. Biological Targets
-        add_section("BIOLOGICAL TARGETS & INTERVALS")
+        # 1. Biological Targets & Hygiene
+        add_section("BIOLOGICAL & HYGIENE TARGETS")
 
-        tk.Label(body, text="Hydration Target (ml/day):", font=("Consolas", 9), fg=TEXT_LIGHT, bg=PANEL_BG).grid(row=row, column=0, sticky="w", pady=3)
-        ent_water = tk.Entry(body, font=("Consolas", 9), bg="#02070b", fg=CYAN_BRIGHT, insertbackground=CYAN_BRIGHT, width=12)
+        tk.Label(body, text="Hydration Target (ml/day):", font=("Consolas", 9), fg=TEXT_LIGHT, bg=PANEL_BG).grid(row=row, column=0, sticky="w", pady=2)
+        ent_water = tk.Entry(body, font=("Consolas", 9), bg="#02070b", fg=CYAN_BRIGHT, insertbackground=CYAN_BRIGHT, insertwidth=2, width=12)
         ent_water.insert(0, str(cfg.get("target_water_ml", 2500)))
-        ent_water.grid(row=row, column=1, sticky="w", pady=3)
+        ent_water.grid(row=row, column=1, sticky="w", pady=2)
         row += 1
 
-        tk.Label(body, text="Hydration Interval (minutes):", font=("Consolas", 9), fg=TEXT_LIGHT, bg=PANEL_BG).grid(row=row, column=0, sticky="w", pady=3)
-        ent_h_int = tk.Entry(body, font=("Consolas", 9), bg="#02070b", fg=CYAN_BRIGHT, insertbackground=CYAN_BRIGHT, width=12)
+        tk.Label(body, text="Hydration Interval (minutes):", font=("Consolas", 9), fg=TEXT_LIGHT, bg=PANEL_BG).grid(row=row, column=0, sticky="w", pady=2)
+        ent_h_int = tk.Entry(body, font=("Consolas", 9), bg="#02070b", fg=CYAN_BRIGHT, insertbackground=CYAN_BRIGHT, insertwidth=2, width=12)
         ent_h_int.insert(0, str(cfg.get("hydration_interval_min", 75)))
-        ent_h_int.grid(row=row, column=1, sticky="w", pady=3)
+        ent_h_int.grid(row=row, column=1, sticky="w", pady=2)
         row += 1
 
-        tk.Label(body, text="Daily Meals Target (rations):", font=("Consolas", 9), fg=TEXT_LIGHT, bg=PANEL_BG).grid(row=row, column=0, sticky="w", pady=3)
-        ent_meals = tk.Entry(body, font=("Consolas", 9), bg="#02070b", fg=CYAN_BRIGHT, insertbackground=CYAN_BRIGHT, width=12)
+        tk.Label(body, text="Daily Meals Target (rations):", font=("Consolas", 9), fg=TEXT_LIGHT, bg=PANEL_BG).grid(row=row, column=0, sticky="w", pady=2)
+        ent_meals = tk.Entry(body, font=("Consolas", 9), bg="#02070b", fg=CYAN_BRIGHT, insertbackground=CYAN_BRIGHT, insertwidth=2, width=12)
         ent_meals.insert(0, str(cfg.get("target_meals", 4)))
-        ent_meals.grid(row=row, column=1, sticky="w", pady=3)
+        ent_meals.grid(row=row, column=1, sticky="w", pady=2)
         row += 1
 
-        tk.Label(body, text="Meal Interval (minutes):", font=("Consolas", 9), fg=TEXT_LIGHT, bg=PANEL_BG).grid(row=row, column=0, sticky="w", pady=3)
-        ent_m_int = tk.Entry(body, font=("Consolas", 9), bg="#02070b", fg=CYAN_BRIGHT, insertbackground=CYAN_BRIGHT, width=12)
+        tk.Label(body, text="Meal Interval (minutes):", font=("Consolas", 9), fg=TEXT_LIGHT, bg=PANEL_BG).grid(row=row, column=0, sticky="w", pady=2)
+        ent_m_int = tk.Entry(body, font=("Consolas", 9), bg="#02070b", fg=CYAN_BRIGHT, insertbackground=CYAN_BRIGHT, insertwidth=2, width=12)
         ent_m_int.insert(0, str(cfg.get("meal_interval_min", 210)))
-        ent_m_int.grid(row=row, column=1, sticky="w", pady=3)
+        ent_m_int.grid(row=row, column=1, sticky="w", pady=2)
+        row += 1
+
+        # Brushing Target Dropdown
+        tk.Label(body, text="Brushing Target (per day):", font=("Consolas", 9), fg=TEXT_LIGHT, bg=PANEL_BG).grid(row=row, column=0, sticky="w", pady=2)
+        combo_brush = ttk.Combobox(body, values=["1", "2"], width=6, state="readonly")
+        combo_brush.set(str(cfg.get("target_brushing", 2)))
+        combo_brush.grid(row=row, column=1, sticky="w", pady=2)
+        row += 1
+
+        # Shower Frequency Dropdown
+        tk.Label(body, text="Shower Frequency:", font=("Consolas", 9), fg=TEXT_LIGHT, bg=PANEL_BG).grid(row=row, column=0, sticky="w", pady=2)
+        combo_shower = ttk.Combobox(body, values=["Daily", "Every alternative Day"], width=16, state="readonly")
+        combo_shower.set(str(cfg.get("shower_frequency", "Daily")))
+        combo_shower.grid(row=row, column=1, sticky="w", pady=2)
         row += 1
 
         # 2. Standby / Sleep Silencing Window
         add_section("STANDBY / SLEEP SILENCING WINDOW (24H HH:MM)")
 
         f_sleep_start = tk.Frame(body, bg=PANEL_BG)
-        tk.Label(body, text="Sleep Inactive Start:", font=("Consolas", 9), fg=TEXT_LIGHT, bg=PANEL_BG).grid(row=row, column=0, sticky="w", pady=3)
-        ent_ss_h = tk.Entry(f_sleep_start, font=("Consolas", 9), bg="#02070b", fg=CYAN_BRIGHT, width=4)
+        tk.Label(body, text="Sleep Inactive Start:", font=("Consolas", 9), fg=TEXT_LIGHT, bg=PANEL_BG).grid(row=row, column=0, sticky="w", pady=2)
+        ent_ss_h = tk.Entry(f_sleep_start, font=("Consolas", 9), bg="#02070b", fg=CYAN_BRIGHT, insertbackground=CYAN_BRIGHT, insertwidth=2, width=4)
         ent_ss_h.insert(0, f"{cfg.get('sleep_start_hour', 23):02d}")
         ent_ss_h.pack(side="left")
         tk.Label(f_sleep_start, text=":", fg=CYAN_BRIGHT, bg=PANEL_BG).pack(side="left")
-        ent_ss_m = tk.Entry(f_sleep_start, font=("Consolas", 9), bg="#02070b", fg=CYAN_BRIGHT, width=4)
+        ent_ss_m = tk.Entry(f_sleep_start, font=("Consolas", 9), bg="#02070b", fg=CYAN_BRIGHT, insertbackground=CYAN_BRIGHT, insertwidth=2, width=4)
         ent_ss_m.insert(0, f"{cfg.get('sleep_start_minute', 0):02d}")
         ent_ss_m.pack(side="left")
-        f_sleep_start.grid(row=row, column=1, sticky="w", pady=3)
+        f_sleep_start.grid(row=row, column=1, sticky="w", pady=2)
         row += 1
 
         f_sleep_end = tk.Frame(body, bg=PANEL_BG)
-        tk.Label(body, text="Wake Active Resume:", font=("Consolas", 9), fg=TEXT_LIGHT, bg=PANEL_BG).grid(row=row, column=0, sticky="w", pady=3)
-        ent_se_h = tk.Entry(f_sleep_end, font=("Consolas", 9), bg="#02070b", fg=CYAN_BRIGHT, width=4)
+        tk.Label(body, text="Wake Active Resume:", font=("Consolas", 9), fg=TEXT_LIGHT, bg=PANEL_BG).grid(row=row, column=0, sticky="w", pady=2)
+        ent_se_h = tk.Entry(f_sleep_end, font=("Consolas", 9), bg="#02070b", fg=CYAN_BRIGHT, insertbackground=CYAN_BRIGHT, insertwidth=2, width=4)
         ent_se_h.insert(0, f"{cfg.get('sleep_end_hour', 7):02d}")
         ent_se_h.pack(side="left")
         tk.Label(f_sleep_end, text=":", fg=CYAN_BRIGHT, bg=PANEL_BG).pack(side="left")
-        ent_se_m = tk.Entry(f_sleep_end, font=("Consolas", 9), bg="#02070b", fg=CYAN_BRIGHT, width=4)
+        ent_se_m = tk.Entry(f_sleep_end, font=("Consolas", 9), bg="#02070b", fg=CYAN_BRIGHT, insertbackground=CYAN_BRIGHT, insertwidth=2, width=4)
         ent_se_m.insert(0, f"{cfg.get('sleep_end_minute', 0):02d}")
         ent_se_m.pack(side="left")
-        f_sleep_end.grid(row=row, column=1, sticky="w", pady=3)
+        f_sleep_end.grid(row=row, column=1, sticky="w", pady=2)
         row += 1
 
-        # 3. Environment & Storage Architecture
+        # 3. Environment & Persistence Engine
         add_section("ENVIRONMENT & PERSISTENCE ENGINE")
 
-        tk.Label(body, text="System IANA Timezone:", font=("Consolas", 9), fg=TEXT_LIGHT, bg=PANEL_BG).grid(row=row, column=0, sticky="w", pady=3)
-        ent_tz = tk.Entry(body, font=("Consolas", 9), bg="#02070b", fg=CYAN_BRIGHT, insertbackground=CYAN_BRIGHT, width=24)
-        ent_tz.insert(0, str(cfg.get("timezone", "UTC")))
-        ent_tz.grid(row=row, column=1, sticky="w", pady=3)
+        # Timezone Combobox with GMT Mappings
+        tk.Label(body, text="System Timezone (GMT):", font=("Consolas", 9), fg=TEXT_LIGHT, bg=PANEL_BG).grid(row=row, column=0, sticky="w", pady=2)
+        current_tz = cfg.get("timezone", "UTC")
+        default_label = next((k for k, v in TIMEZONE_MAP.items() if v == current_tz), "Asia/Kolkata (GMT+05:30)")
+        
+        combo_tz = ttk.Combobox(body, values=list(TIMEZONE_MAP.keys()), width=28, state="readonly")
+        combo_tz.set(default_label)
+        combo_tz.grid(row=row, column=1, sticky="w", pady=2)
         row += 1
 
-        tk.Label(body, text="Storage Architecture:", font=("Consolas", 9), fg=TEXT_LIGHT, bg=PANEL_BG).grid(row=row, column=0, sticky="w", pady=3)
+        tk.Label(body, text="Storage Architecture:", font=("Consolas", 9), fg=TEXT_LIGHT, bg=PANEL_BG).grid(row=row, column=0, sticky="w", pady=2)
         combo_storage = ttk.Combobox(body, values=["local", "supabase"], width=12, state="readonly")
         combo_storage.set(cfg.get("storage_mode", "local"))
-        combo_storage.grid(row=row, column=1, sticky="w", pady=3)
+        combo_storage.grid(row=row, column=1, sticky="w", pady=2)
         row += 1
 
-        tk.Label(body, text="Supabase URL:", font=("Consolas", 9), fg=TEXT_LIGHT, bg=PANEL_BG).grid(row=row, column=0, sticky="w", pady=3)
-        ent_url = tk.Entry(body, font=("Consolas", 9), bg="#02070b", fg=CYAN_BRIGHT, insertbackground=CYAN_BRIGHT, width=28)
+        tk.Label(body, text="Supabase URL:", font=("Consolas", 9), fg=TEXT_LIGHT, bg=PANEL_BG).grid(row=row, column=0, sticky="w", pady=2)
+        ent_url = tk.Entry(body, font=("Consolas", 9), bg="#02070b", fg=CYAN_BRIGHT, insertbackground=CYAN_BRIGHT, insertwidth=2, width=28)
         ent_url.insert(0, str(cfg.get("supabase_url", "")))
-        ent_url.grid(row=row, column=1, sticky="w", pady=3)
+        ent_url.grid(row=row, column=1, sticky="w", pady=2)
         row += 1
 
-        tk.Label(body, text="Supabase Anon/Service Key:", font=("Consolas", 9), fg=TEXT_LIGHT, bg=PANEL_BG).grid(row=row, column=0, sticky="w", pady=3)
-        ent_key = tk.Entry(body, font=("Consolas", 9), bg="#02070b", fg=CYAN_BRIGHT, insertbackground=CYAN_BRIGHT, width=28, show="*")
+        tk.Label(body, text="Supabase Anon Key:", font=("Consolas", 9), fg=TEXT_LIGHT, bg=PANEL_BG).grid(row=row, column=0, sticky="w", pady=2)
+        ent_key = tk.Entry(body, font=("Consolas", 9), bg="#02070b", fg=CYAN_BRIGHT, insertbackground=CYAN_BRIGHT, insertwidth=2, width=28, show="*")
         ent_key.insert(0, str(cfg.get("supabase_key", "")))
-        ent_key.grid(row=row, column=1, sticky="w", pady=3)
+        ent_key.grid(row=row, column=1, sticky="w", pady=2)
         row += 1
 
         def commit_settings():
             try:
+                selected_tz_label = combo_tz.get()
+                resolved_iana_tz = TIMEZONE_MAP.get(selected_tz_label, "UTC")
+
                 new_cfg = {
-                    "timezone": ent_tz.get().strip() or "UTC",
+                    "timezone": resolved_iana_tz,
                     "storage_mode": combo_storage.get().strip(),
                     "supabase_url": ent_url.get().strip(),
                     "supabase_key": ent_key.get().strip(),
@@ -942,6 +1192,8 @@ class SubnauticaPDAGUI:
                     "hydration_interval_min": int(ent_h_int.get().strip()),
                     "target_meals": int(ent_meals.get().strip()),
                     "meal_interval_min": int(ent_m_int.get().strip()),
+                    "target_brushing": int(combo_brush.get().strip()),
+                    "shower_frequency": combo_shower.get().strip(),
                     "sleep_start_hour": int(ent_ss_h.get().strip()),
                     "sleep_start_minute": int(ent_ss_m.get().strip()),
                     "sleep_end_hour": int(ent_se_h.get().strip()),
@@ -951,7 +1203,7 @@ class SubnauticaPDAGUI:
                 config_manager.save_config(new_cfg)
                 self.hud.reload_config()
                 self.refresh_display()
-                self.log_terminal("CONFIG OVERRIDE: Bio-parameters and system targets updated.")
+                self.log_terminal("CONFIG OVERRIDE: Bio-parameters, hygiene targets, and timezone updated.")
                 messagebox.showinfo("Alterra PDA", "Biometric targets and system configuration saved successfully.")
                 win.destroy()
             except ValueError as ve:
@@ -964,7 +1216,7 @@ class SubnauticaPDAGUI:
             bg="#0e2838", fg=CYAN_BRIGHT, activebackground=CYAN_DIM, activeforeground="#ffffff",
             bd=1, relief="ridge", pady=6, cursor="hand2", command=commit_settings
         )
-        btn_commit.pack(fill="x", padx=16, pady=12)
+        btn_commit.pack(fill="x", padx=16, pady=10)
 
 
 if __name__ == "__main__":

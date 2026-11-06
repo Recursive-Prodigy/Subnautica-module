@@ -4,6 +4,63 @@ import edge_tts
 import soundfile as sf
 import sounddevice as sd
 from pedalboard import Pedalboard, Chorus, HighpassFilter, Gain, Reverb
+import os
+import tempfile
+import pygame
+
+pygame.mixer.init()
+
+def _play_audio_file(file_path: str):
+    try:
+        pygame.mixer.music.load(file_path)
+        pygame.mixer.music.play()
+        while pygame.mixer.music.get_busy():
+            pygame.time.Clock().tick(10)
+    except Exception as e:
+        print(f"[AUDIO PLAYBACK ERROR] {e}")
+
+async def _edge_speak_async(text: str, voice: str = "en-GB-SoniaNeural"):
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as fp:
+        temp_path = fp.name
+    try:
+        communicate = edge_tts.Communicate(text, voice)
+        await communicate.save(temp_path)
+        _play_audio_file(temp_path)
+    finally:
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
+
+def speak(text: str, engine: str = "pda"):
+    """
+    Unified voice synthesizer router:
+    - 'pda': Standard Alterra British female TTS (Edge-TTS).
+    - 'ultron': Deep mechanical synthesis cascade (ElevenLabs -> Local RTX 2060 GPU RVC -> CPU ONNX Piper).
+    """
+    if not text:
+        return
+
+    if engine.lower() == "ultron":
+        try:
+            import ultron_synthesizer as us
+            cache_dir = os.path.join(os.path.dirname(__file__), "audio_cache")
+            os.makedirs(cache_dir, exist_ok=True)
+            out_wav = os.path.join(cache_dir, "ultron_override.wav")
+            us.speak_ultron(text, out_wav, play=True)
+            return
+        except Exception as e:
+            print(f"[ULTRON SYNTH ERROR] Falling back to Alterra voice: {e}")
+
+    # Alterra PDA Default
+    try:
+        asyncio.run(_edge_speak_async(text))
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(_edge_speak_async(text))
+        loop.close()
 
 # Alterra Subnautica DSP Chain (Synthetic metallic PDA effect)
 pda_board = Pedalboard([

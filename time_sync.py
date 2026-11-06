@@ -7,7 +7,15 @@ from config_manager import load_config, DEFAULT_CONFIG
 class TimeSync:
     def __init__(self):
         cfg = load_config() or DEFAULT_CONFIG
-        self.target_tz = zoneinfo.ZoneInfo(cfg.get("timezone", "UTC"))
+        tz_str = cfg.get("timezone", "UTC")
+        
+        # Safe zoneinfo lookup with local system fallback if tzdata is absent
+        try:
+            self.target_tz = zoneinfo.ZoneInfo(tz_str)
+        except (zoneinfo.ZoneInfoNotFoundError, Exception):
+            local_tz = datetime.now().astimezone().tzinfo
+            self.target_tz = local_tz if local_tz else timezone.utc
+
         self.offset_seconds = 0.0
         self.is_synced = False
         self.sync_time()
@@ -33,4 +41,5 @@ class TimeSync:
         utc_ts = datetime.now(timezone.utc).timestamp() + self.offset_seconds
         return datetime.fromtimestamp(utc_ts, tz=timezone.utc).astimezone(self.target_tz)
 
+# Instantiate singleton after definition
 time_manager = TimeSync()
