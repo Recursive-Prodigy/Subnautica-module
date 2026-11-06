@@ -1,7 +1,9 @@
 import os
+import sys
+import uuid
+import shutil
 import subprocess
 import soundfile as sf
-import sounddevice as sd
 
 MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -14,12 +16,11 @@ CACHE_DIR = os.path.join(MODULE_DIR, "audio_cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
 # ---------------------------------------------------------------------------
-# HARDWARE & RUNTIME CHECK (Cached + 15s Safe Headroom)
+# HARDWARE & RUNTIME CHECK (Cached + 15s Headroom + Explicit CWD)
 # ---------------------------------------------------------------------------
 _CUDA_AVAILABLE_CACHE = None
 
 def is_cuda_available() -> bool:
-    """Probes isolated runtime once for CUDA without importing torch into host."""
     global _CUDA_AVAILABLE_CACHE
     if _CUDA_AVAILABLE_CACHE is not None:
         return _CUDA_AVAILABLE_CACHE
@@ -31,18 +32,16 @@ def is_cuda_available() -> bool:
 
     try:
         cmd = [RVC_PYTHON, "-c", "import torch; exit(0 if torch.cuda.is_available() else 1)"]
-        # 15s timeout avoids false failures during cold disk cache reads on Windows
-        res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+        res = subprocess.run(
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=15, cwd=MODULE_DIR
+        )
         _CUDA_AVAILABLE_CACHE = (res.returncode == 0)
         if _CUDA_AVAILABLE_CACHE:
-            print("[TIER 2 READY] RTX 2060 CUDA confirmed in worker environment.")
+            print("[TIER 2 READY] RTX 2060 CUDA verified in worker environment.")
         else:
-            print("[TIER 2 WARNING] PyTorch reported CUDA unavailable.")
+            print("[TIER 2 WARNING] PyTorch reports CUDA unavailable.")
         return _CUDA_AVAILABLE_CACHE
-    except subprocess.TimeoutExpired:
-        print("[TIER 2 WARNING] CUDA probe timed out (>15s). Defaulting to False.")
-        _CUDA_AVAILABLE_CACHE = False
-        return False
     except Exception as e:
         print(f"[TIER 2 WARNING] Hardware probe failed: {e}")
         _CUDA_AVAILABLE_CACHE = False
@@ -52,7 +51,6 @@ def is_cuda_available() -> bool:
 # TIER 1: ElevenLabs (Cloud Neural API)
 # ---------------------------------------------------------------------------
 def _tier1_elevenlabs(text: str, out_wav: str) -> bool:
-    """Delegates to elevenlabs_engine (.env credentials + MD5 caching)."""
     try:
         import elevenlabs_engine
         return elevenlabs_engine.synthesize(text, out_wav)
@@ -60,14 +58,16 @@ def _tier1_elevenlabs(text: str, out_wav: str) -> bool:
         return False
 
 # ---------------------------------------------------------------------------
-# TIER 2: Local GPU RVC (RTX 2060 Workstation)
+# TIER 2: Local GPU RVC (Explicit CWD + Lockless UUID Pipeline)
 # ---------------------------------------------------------------------------
 def _tier2_local_rvc(text: str, out_wav: str) -> bool:
     if not is_cuda_available():
-        print("[TIER 2] CUDA check failed, falling back to Tier 3.")
+        print("[TIER 2] CUDA check failed, cascading to Tier 3.")
         return False
 
-    temp_piper = os.path.join(CACHE_DIR, "t2_piper_raw.wav")
+    session_id = uuid.uuid4().hex[:8]
+    temp_piper = os.path.join(CACHE_DIR, f"t2_piper_{session_id}.wav")
+
     try:
         # Step A: Synthesize base voice with Spader cadence parameters
         cmd_piper = [
@@ -79,17 +79,23 @@ def _tier2_local_rvc(text: str, out_wav: str) -> bool:
             "--noise-scale", "0.33",
             "--noise-w", "0.60"
         ]
-        proc = subprocess.Popen(cmd_piper, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        proc = subprocess.Popen(
+            cmd_piper, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE, cwd=MODULE_DIR
+        )
         _, p_err = proc.communicate(input=text.encode("utf-8"))
 
         if proc.returncode != 0 or not os.path.exists(temp_piper):
-            print(f"[TIER 2 PIPER ERROR]: {p_err.decode() if p_err else 'Unknown'}")
+            print(f"[TIER 2 PIPER ERROR]: {p_err.decode('utf-8', errors='ignore') if p_err else 'Unknown'}")
             return False
 
-        # Step B: Run through isolated RVC worker on GPU
+        # Step B: Run through isolated RVC worker on GPU (Explicit CWD prevents missing rmvpe.pt)
         cmd_rvc = [RVC_PYTHON, RVC_WORKER, temp_piper, out_wav]
-        res = subprocess.run(cmd_rvc, capture_output=True, text=True, timeout=60)
-        
+        res = subprocess.run(
+            cmd_rvc, capture_output=True, text=True,
+            timeout=60, cwd=MODULE_DIR
+        )
+
         if res.returncode != 0:
             print(f"[TIER 2 RVC WORKER CRASH (Code {res.returncode})]:\n{res.stderr}")
             return False
@@ -112,12 +118,13 @@ def _tier2_local_rvc(text: str, out_wav: str) -> bool:
                 pass
 
 # ---------------------------------------------------------------------------
-# TIER 3: Portable CPU Fallback (Preserved Custom Thresholds & Dynamic SR)
+# TIER 3: Portable CPU Fallback (Harden FFmpeg Path & Dynamic SR)
 # ---------------------------------------------------------------------------
 def _tier3_cpu_portable(text: str, out_wav: str) -> bool:
-    raw_piper = os.path.join(CACHE_DIR, "t3_piper_raw.wav")
+    session_id = uuid.uuid4().hex[:8]
+    raw_piper = os.path.join(CACHE_DIR, f"t3_piper_{session_id}.wav")
+
     try:
-        # Step A: Fast CPU Piper synthesis with user's calibrated threshold values
         cmd_piper = [
             PIPER_EXE,
             "--model", BASE_MODEL,
@@ -127,13 +134,16 @@ def _tier3_cpu_portable(text: str, out_wav: str) -> bool:
             "--noise-scale", "0.30",
             "--noise-w", "0.60"
         ]
-        proc = subprocess.Popen(cmd_piper, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        proc = subprocess.Popen(
+            cmd_piper, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, cwd=MODULE_DIR
+        )
         proc.communicate(input=text.encode("utf-8"))
 
         if not os.path.exists(raw_piper):
             return False
 
-        # Step B: Read true sample rate to ensure pitch drop is exact
+        # Read true sample rate
         try:
             info = sf.info(raw_piper)
             in_sr = info.samplerate
@@ -144,7 +154,6 @@ def _tier3_cpu_portable(text: str, out_wav: str) -> bool:
         tempo_factor = 1.0 / rate_factor
         target_asetrate = int(round(in_sr * rate_factor))
 
-        # Step C: Tuned mechanical chassis DSP rack (Preserved user settings)
         dsp_chain = (
             f"asetrate={target_asetrate},"
             f"atempo={tempo_factor:.4f},"
@@ -163,8 +172,16 @@ def _tier3_cpu_portable(text: str, out_wav: str) -> bool:
         except ImportError:
             pass
 
-        cmd_ffmpeg = ["ffmpeg", "-y", "-i", raw_piper, "-af", dsp_chain, out_wav]
-        res = subprocess.run(cmd_ffmpeg, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # Resolve explicit FFmpeg binary to survive thread-isolated PATH environments
+        ffmpeg_bin = shutil.which("ffmpeg") or "ffmpeg"
+        cmd_ffmpeg = [ffmpeg_bin, "-y", "-i", raw_piper, "-af", dsp_chain, out_wav]
+        res = subprocess.run(
+            cmd_ffmpeg, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            cwd=MODULE_DIR
+        )
+
+        if res.returncode != 0:
+            print(f"[TIER 3 DSP WARNING] FFmpeg exit {res.returncode}: {res.stderr.decode('utf-8', errors='ignore')}")
 
         return res.returncode == 0 and os.path.exists(out_wav)
 
@@ -184,15 +201,10 @@ def _tier3_cpu_portable(text: str, out_wav: str) -> bool:
 def speak_ultron(text: str, out_wav: str, play: bool = False) -> str:
     tier_used = None
 
-    # 1. Try ElevenLabs
     if _tier1_elevenlabs(text, out_wav):
         tier_used = "TIER_1_ELEVENLABS"
-
-    # 2. Try RTX 2060 Local RVC
     elif _tier2_local_rvc(text, out_wav):
         tier_used = "TIER_2_LOCAL_GPU_RVC"
-
-    # 3. Universal CPU Fallback
     elif _tier3_cpu_portable(text, out_wav):
         tier_used = "TIER_3_CPU_PORTABLE"
 
@@ -201,10 +213,15 @@ def speak_ultron(text: str, out_wav: str, play: bool = False) -> str:
 
     print(f"[ULTRON VOICE] Synthesized via: {tier_used}")
 
+    # Fallback playback if called in standalone mode
     if play and os.path.exists(out_wav):
-        data, sr = sf.read(out_wav)
-        sd.play(data, sr)
-        sd.wait()
+        try:
+            import sounddevice as sd
+            data, sr = sf.read(out_wav)
+            sd.play(data, sr)
+            sd.wait()
+        except Exception as e:
+            print(f"[AUDIO PLAYBACK ERROR] Standalone player failed: {e}")
 
     return tier_used
 

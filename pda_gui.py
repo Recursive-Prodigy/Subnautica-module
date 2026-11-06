@@ -1,16 +1,26 @@
+import os
 import sys
-import tkinter as tk
-from tkinter import ttk, messagebox
+import subprocess
 import threading
 from datetime import datetime, time, timezone, timedelta
+import tkinter as tk
+from tkinter import ttk, messagebox
+
+# System Tray & UI Graphics
 import pystray
 from PIL import Image, ImageDraw
-import os
+
+# Project Backend, Config & State
 import database
+db = database
+import config_manager
+import time_sync
+from time_sync import time_manager
 from hud_state import HUDState
+
+# Voice Engine & Voice Banks
 import dialogues
 from voice_engine import speak
-import config_manager
 
 # --- ALTERRA PALETTE CONSTANTS ---
 BG_DARK = "#040b11"
@@ -331,64 +341,174 @@ class SubnauticaPDAGUI:
         self.lbl_food_timer = tk.Label(f_stats, text="Last: Never | Interval: 210m", font=("Consolas", 8), fg=TEXT_MUTED, bg=PANEL_BG)
         self.lbl_food_timer.pack(side="right")
 
+    def action_log_exercise_dialog(self):
+        win = tk.Toplevel(self.root)
+        win.title("LOG PHYSICAL EXERTION")
+        win.geometry("380x260")
+        win.configure(bg=PANEL_BG)
+        win.resizable(False, False)
+
+        tk.Label(win, text="PHYSICAL LOAD TELEMETRY", font=("Consolas", 11, "bold"), fg=CYAN_BRIGHT, bg=PANEL_BG).pack(pady=10)
+
+        f_body = tk.Frame(win, bg=PANEL_BG, padx=20)
+        f_body.pack(fill="x", pady=5)
+
+        tk.Label(f_body, text="Exertion Duration (Hours):", font=("Consolas", 9), fg=TEXT_LIGHT, bg=PANEL_BG).grid(row=0, column=0, sticky="w", pady=8)
+        ent_dur = tk.Entry(f_body, font=("Consolas", 9), bg="#02070b", fg=CYAN_BRIGHT, insertbackground=CYAN_BRIGHT, insertwidth=2, width=8)
+        ent_dur.insert(0, "1.0")
+        ent_dur.grid(row=0, column=1, sticky="w", pady=8, padx=5)
+
+        tk.Label(f_body, text="Exertion Intensity:", font=("Consolas", 9), fg=TEXT_LIGHT, bg=PANEL_BG).grid(row=1, column=0, sticky="w", pady=8)
+        combo_int = ttk.Combobox(f_body, values=["Moderate (Gym/Cardio)", "High (Heavy Resistance)", "Extreme"], width=18, state="readonly")
+        combo_int.set("Moderate (Gym/Cardio)")
+        combo_int.grid(row=1, column=1, sticky="w", pady=8, padx=5)
+
+        def save_exercise():
+            try:
+                hrs = float(ent_dur.get().strip())
+                if hrs <= 0.0:
+                    raise ValueError("Duration must be greater than zero.")
+                if hrs > 16.0:
+                    raise ValueError("Maximum physical exertion threshold is capped at 16.0 hours.")
+
+                db.log_exercise(hrs, combo_int.get())
+                self.log_terminal(f"TELEMETRY LOGGED: Physical exertion ({hrs:.1f}h) committed to bio-reserve.")
+                self.refresh_display()
+                line = "Physical exertion logged. Cellular glycogen and stamina budget updated."
+                threading.Thread(target=speak, args=(line, "pda"), daemon=True).start()
+                win.destroy()
+            except ValueError as ve:
+                messagebox.showerror("Exertion Limit", str(ve))
+
+        btn = tk.Button(win, text="RECORD PHYSICAL LOAD", font=("Consolas", 9, "bold"), bg="#0e2838", fg=CYAN_BRIGHT, bd=1, relief="ridge", command=save_exercise, cursor="hand2")
+        btn.pack(pady=15, fill="x", padx=25)
+
+    def action_log_nap_dialog(self):
+        win = tk.Toplevel(self.root)
+        win.title("LOG POWER NAP")
+        win.geometry("380x240")
+        win.configure(bg=PANEL_BG)
+        win.resizable(False, False)
+
+        tk.Label(win, text="DAYTIME RECOVERY LOG", font=("Consolas", 11, "bold"), fg=CYAN_BRIGHT, bg=PANEL_BG).pack(pady=10)
+
+        f_body = tk.Frame(win, bg=PANEL_BG, padx=20)
+        f_body.pack(fill="x", pady=5)
+
+        tk.Label(f_body, text="Nap Duration (Minutes):", font=("Consolas", 9), fg=TEXT_LIGHT, bg=PANEL_BG).grid(row=0, column=0, sticky="w", pady=8)
+        ent_nap = tk.Entry(f_body, font=("Consolas", 9), bg="#02070b", fg=CYAN_BRIGHT, insertbackground=CYAN_BRIGHT, insertwidth=2, width=8)
+        ent_nap.insert(0, "30")
+        ent_nap.grid(row=0, column=1, sticky="w", pady=8, padx=5)
+
+        def save_nap():
+            try:
+                mins = int(ent_nap.get().strip())
+                if mins <= 5 or mins > 360:
+                    raise ValueError("Nap duration must be between 5 and 360 minutes.")
+
+                db.log_nap(mins)
+                self.log_terminal(f"TELEMETRY LOGGED: Rest cycle ({mins}m) integrated.")
+                self.refresh_display()
+
+                if mins > 90:
+                    line = "Warning. Prolonged daytime sleep exceeds optimal limits. Circadian phase delay projected for nocturnal sleep."
+                else:
+                    line = "Rest recovery cycle recorded. Homeostatic sleep pressure partially cleared."
+
+                threading.Thread(target=speak, args=(line, "pda"), daemon=True).start()
+                win.destroy()
+            except ValueError as ve:
+                messagebox.showerror("Nap Input Error", str(ve))
+
+        btn = tk.Button(win, text="COMMIT RECOVERY", font=("Consolas", 9, "bold"), bg="#0e2838", fg=CYAN_BRIGHT, bd=1, relief="ridge", command=save_nap, cursor="hand2")
+        btn.pack(pady=15, fill="x", padx=25)
+
     def _build_action_deck(self):
-        deck_frame = tk.Frame(self.root, bg=BG_DARK, padx=20, pady=2)
+        deck_frame = tk.Frame(self.root, bg=BG_DARK, padx=16, pady=3)
         deck_frame.pack(fill="x")
 
-        # Row 1: Primary Metabolism Logs
+        # -------------------------------------------------------------------
+        # ROW 1: METABOLISM & CELLULAR RECOVERY PROTOCOLS
+        # -------------------------------------------------------------------
         row1 = tk.Frame(deck_frame, bg=BG_DARK)
         row1.pack(fill="x", pady=2)
 
+        # 1. Hydration (+250ml)
         btn_water = tk.Button(
-            row1, text="+ LOG HYDRATION (250ml)", font=("Consolas", 9, "bold"),
+            row1, text="💧 +250ml WATER", font=("Consolas", 8, "bold"),
             bg="#0e2838", fg=CYAN_BRIGHT, activebackground=CYAN_DIM, activeforeground="#ffffff",
-            bd=1, relief="ridge", padx=8, pady=6, cursor="hand2", command=self.action_log_water
+            bd=1, relief="ridge", padx=4, pady=6, cursor="hand2", command=self.action_log_water
         )
         btn_water.pack(side="left", expand=True, fill="x", padx=2)
 
+        # 2. Meal Ration
         btn_meal = tk.Button(
-            row1, text="+ LOG SUSTENANCE MEAL", font=("Consolas", 9, "bold"),
+            row1, text="🍲 + LOG MEAL", font=("Consolas", 8, "bold"),
             bg="#0e2838", fg=CYAN_BRIGHT, activebackground=CYAN_DIM, activeforeground="#ffffff",
-            bd=1, relief="ridge", padx=8, pady=6, cursor="hand2", command=self.action_log_meal
+            bd=1, relief="ridge", padx=4, pady=6, cursor="hand2", command=self.action_log_meal
         )
         btn_meal.pack(side="left", expand=True, fill="x", padx=2)
 
+        # 3. Primary Sleep Cycle
         btn_sleep = tk.Button(
-            row1, text="+ LOG SLEEP CYCLE", font=("Consolas", 9, "bold"),
+            row1, text="🌙 + SLEEP CYCLE", font=("Consolas", 8, "bold"),
             bg="#0e2838", fg=CYAN_BRIGHT, activebackground=CYAN_DIM, activeforeground="#ffffff",
-            bd=1, relief="ridge", padx=8, pady=6, cursor="hand2", command=self.action_log_sleep_dialog
+            bd=1, relief="ridge", padx=4, pady=6, cursor="hand2", command=self.action_log_sleep_dialog
         )
         btn_sleep.pack(side="left", expand=True, fill="x", padx=2)
 
-        # Row 2: Hygiene Protocols & Archive Controls
+        # 4. Daytime Power Nap
+        btn_nap = tk.Button(
+            row1, text="💤 + RECOVERY NAP", font=("Consolas", 8, "bold"),
+            bg="#0a202e", fg="#33b3ff", activebackground=CYAN_DIM, activeforeground="#ffffff",
+            bd=1, relief="ridge", padx=4, pady=6, cursor="hand2", command=self.action_log_nap_dialog
+        )
+        btn_nap.pack(side="left", expand=True, fill="x", padx=2)
+
+        # -------------------------------------------------------------------
+        # ROW 2: HYGIENE, PHYSICAL LOAD & SYSTEM TELEMETRY
+        # -------------------------------------------------------------------
         row2 = tk.Frame(deck_frame, bg=BG_DARK)
         row2.pack(fill="x", pady=2)
 
+        # 1. Brushing Protocol
         btn_brush = tk.Button(
-            row2, text="🪥 LOG BRUSHING", font=("Consolas", 9, "bold"),
+            row2, text="🪥 BRUSH", font=("Consolas", 8, "bold"),
             bg="#082230", fg="#00c8ff", activebackground=CYAN_DIM, activeforeground="#ffffff",
-            bd=1, relief="ridge", padx=8, pady=6, cursor="hand2", command=self.action_log_brush
+            bd=1, relief="ridge", padx=4, pady=6, cursor="hand2",
+            command=getattr(self, "action_log_brush", getattr(self, "action_log_brushing", None))
         )
         btn_brush.pack(side="left", expand=True, fill="x", padx=2)
 
+        # 2. Decontamination Shower
         btn_shower = tk.Button(
-            row2, text="🚿 LOG SHOWER", font=("Consolas", 9, "bold"),
+            row2, text="🚿 SHOWER", font=("Consolas", 8, "bold"),
             bg="#08222a", fg="#00e5a3", activebackground=CYAN_DIM, activeforeground="#ffffff",
-            bd=1, relief="ridge", padx=8, pady=6, cursor="hand2", command=self.action_log_shower
+            bd=1, relief="ridge", padx=4, pady=6, cursor="hand2", command=self.action_log_shower
         )
         btn_shower.pack(side="left", expand=True, fill="x", padx=2)
 
+        # 3. Physical Exertion / Workout Load
+        btn_ex = tk.Button(
+            row2, text="⚡ WORKOUT", font=("Consolas", 8, "bold"),
+            bg="#211806", fg="#ffaa00", activebackground="#3d2a08", activeforeground="#ffffff",
+            bd=1, relief="ridge", padx=4, pady=6, cursor="hand2", command=self.action_log_exercise_dialog
+        )
+        btn_ex.pack(side="left", expand=True, fill="x", padx=2)
+
+        # 4. Multi-Table Telemetry Rollback
         btn_undo = tk.Button(
-            row2, text="↺ UNDO LAST", font=("Consolas", 9, "bold"),
+            row2, text="↺ UNDO", font=("Consolas", 8, "bold"),
             bg="#211014", fg="#ff4455", activebackground="#38151c", activeforeground="#ffffff",
-            bd=1, relief="ridge", padx=10, pady=6, cursor="hand2", command=self.action_undo_intake
+            bd=1, relief="ridge", padx=6, pady=6, cursor="hand2", command=self.action_undo_intake
         )
         btn_undo.pack(side="left", expand=False, padx=2)
 
+        # 5. Biometric Archives
         btn_archives = tk.Button(
-            row2, text="📊 ARCHIVES", font=("Consolas", 9, "bold"),
+            row2, text="📊 ARCHIVES", font=("Consolas", 8, "bold"),
             bg="#0e2838", fg=CYAN_BRIGHT, activebackground=CYAN_DIM, activeforeground="#ffffff",
-            bd=1, relief="ridge", padx=10, pady=6, cursor="hand2", command=self.action_view_archives
+            bd=1, relief="ridge", padx=6, pady=6, cursor="hand2", command=self.action_view_archives
         )
         btn_archives.pack(side="left", expand=False, padx=2)
 
@@ -408,7 +528,7 @@ class SubnauticaPDAGUI:
         self.log_terminal("Biometric telemetry online.")
 
     def log_terminal(self, text: str):
-        now_str = datetime.now().strftime("%H:%M:%S")
+        now_str = time_manager.now().strftime("%I:%M:%S %p")
         self.terminal.insert("end", f"[{now_str}] > {text}\n")
         self.terminal.see("end")
 
@@ -436,22 +556,15 @@ class SubnauticaPDAGUI:
         n_sub = f"{max(0, m_interval - n_min)}m left" if n_min < m_interval else f"+{n_min - m_interval}m over"
         self.gauge_food.set_data(fraction=n_frac, center_val=f"{m_cnt}/{m_tgt}", sub_val=n_sub, status=n_status)
 
-        # Sleep
-        sleep_history = database.get_all_sleep_history(limit=1)
-        if sleep_history:
-            last_wake_str = sleep_history[0].get("wake_time", "")
-            try:
-                t_wake = datetime.strptime(last_wake_str, "%Y-%m-%d %H:%M")
-                hours_awake = (datetime.now() - t_wake).total_seconds() / 3600.0
-            except Exception:
-                hours_awake = 8.0
-        else:
-            hours_awake = 8.0
-
-        alertness_frac = max(0.0, min(1.0, 1.0 - (hours_awake / 16.0)))
-        s_status = "OPTIMAL" if hours_awake < 14.0 else ("DUE" if hours_awake < 17.0 else "OVERDUE")
-        self.gauge_sleep.set_data(fraction=alertness_frac, center_val=f"{int(alertness_frac * 100)}%", sub_val=f"{hours_awake:.1f}h awake", status=s_status)
-
+       # --- SLEEP & BIO-ENERGY (Two-Process Bio-Energy Engine) ---
+        alertness_frac, s_center, s_sub, s_status, is_dip = self.hud.evaluate_rest()
+        self.gauge_sleep.set_data(
+            fraction=alertness_frac,
+            center_val=s_center,
+            sub_val=s_sub,
+            status=s_status
+        )
+        
         # --- 2. HYGIENE GAUGES (BRUSH & SHOWER) ---
         target_brush = int(cfg.get("target_brushing", 2))
         shower_freq = cfg.get("shower_frequency", "Daily")
@@ -536,19 +649,29 @@ class SubnauticaPDAGUI:
         self.refresh_display()
 
         if not self.hud.is_sleep_window():
+            # --- CIRCADIAN TROUGH PROTOCOL (Process C Slump) ---
+            _, _, _, _, is_dip = self.hud.evaluate_rest()
+            if is_dip and not getattr(self, "_circadian_alerted_today", False):
+                self._circadian_alerted_today = True
+                dip_msg = "Notice: Physiological telemetry indicates onset of circadian slump. Anticipate transient cognitive latency."
+                self.log_terminal(f"PHYSIOLOGICAL EVENT: {dip_msg}")
+                threading.Thread(target=speak, args=(dip_msg, "pda"), daemon=True).start()
+            elif not is_dip:
+                # Reset once you pass through the 7-9h wake window
+                self._circadian_alerted_today = False
+
+            # --- METABOLIC STATUS EVALUATION ---
             h_status, _ = self.hud.evaluate_hydration()
             n_status, _ = self.hud.evaluate_nutrition()
 
-            # --- HYDRATION PROTOCOL ---
+            # 1. Hydration Monitoring
             if h_status != self._last_h_alert:
                 if h_status == "OVERDUE":
-                    # Critical Override: Ultron Speaks
                     line = dialogues.get_ultron_dialogue("hydration_critical")
                     self.log_terminal(f"CRITICAL OVERRIDE: {line}")
                     threading.Thread(target=speak, args=(line, "ultron"), daemon=True).start()
                     self._last_h_alert = h_status
                 elif h_status == "DUE":
-                    # Gentle Alert: Alterra PDA Speaks
                     line = dialogues.get_dialogue("hydration_due")
                     self.log_terminal(f"TELEMETRY ALERT: {line}")
                     threading.Thread(target=speak, args=(line, "pda"), daemon=True).start()
@@ -556,22 +679,25 @@ class SubnauticaPDAGUI:
                 elif h_status == "OPTIMAL":
                     self._last_h_alert = None
 
-            # --- NUTRITION PROTOCOL ---
+            # 2. Nutrition Monitoring
             if n_status != self._last_n_alert:
                 if n_status == "OVERDUE":
-                    # Critical Override: Ultron Speaks
                     line = dialogues.get_ultron_dialogue("meal_critical")
                     self.log_terminal(f"CRITICAL OVERRIDE: {line}")
                     threading.Thread(target=speak, args=(line, "ultron"), daemon=True).start()
                     self._last_n_alert = n_status
                 elif n_status == "DUE":
-                    # Gentle Alert: Alterra PDA Speaks
                     line = dialogues.get_dialogue("meal_due")
                     self.log_terminal(f"TELEMETRY ALERT: {line}")
                     threading.Thread(target=speak, args=(line, "pda"), daemon=True).start()
                     self._last_n_alert = n_status
                 elif n_status == "OPTIMAL":
                     self._last_n_alert = None
+        else:
+            # Standby window active: clear alert memory for clean morning initialization
+            self._last_h_alert = None
+            self._last_n_alert = None
+            self._circadian_alerted_today = False
 
         self.root.after(60000, self.poll_timers)
 
@@ -610,27 +736,34 @@ class SubnauticaPDAGUI:
 
     def quit_application(self, icon=None, item=None):
         if self.tray_icon:
-            self.tray_icon.stop()
+            try:
+                self.tray_icon.stop()
+            except Exception:
+                pass
 
-        # If shutting down during sleep window, fire Ultron Nightwatch as a detached process
+        # If shutting down during sleep window, spawn Ultron Nightwatch as a detached process
         if self.hud.is_sleep_window():
-            import subprocess
-            nightwatch_script = os.path.join(os.path.dirname(__file__), "ultron_nightwatch.py")
+            nightwatch_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ultron_nightwatch.py")
             py_exe = sys.executable
 
             DETACHED_PROCESS = 0x00000008
             CREATE_NEW_PROCESS_GROUP = 0x00000200
 
-            subprocess.Popen(
-                [py_exe, nightwatch_script],
-                creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
-                close_fds=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
+            try:
+                subprocess.Popen(
+                    [py_exe, nightwatch_script],
+                    creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
+                    close_fds=True,
+                    cwd=os.path.dirname(os.path.abspath(__file__)),
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
+            except Exception as e:
+                print(f"[NIGHTWATCH SPAWN ERROR] {e}")
+
             self.root.destroy()
         else:
-            # Daytime shutdown: Play Alterra British farewell
+            # Daytime shutdown: Alterra farewell dialogue
             shutdown_msg = dialogues.SHUTDOWN
             threading.Thread(target=speak, args=(shutdown_msg, "pda"), daemon=False).start()
             self.root.after(700, self.root.destroy)
@@ -673,15 +806,18 @@ class SubnauticaPDAGUI:
         threading.Thread(target=speak, args=(line, "pda"), daemon=True).start()
 
     def action_undo_intake(self):
+        """Purges the most recent metabolic or hygiene entry across SQLite/Supabase."""
         deleted = database.undo_last_intake()
         if not deleted:
-            self.log_terminal("UNDO ERROR: No recent telemetry entries found to purge.")
+            self.log_terminal("UNDO NOTICE: No recent telemetry entries found to purge.")
+            messagebox.showinfo("Alterra PDA", "No recent intake or hygiene records found to rollback.")
             return
 
         i_type = deleted.get("type", "unknown")
         amt = deleted.get("amount", 0)
         tag = deleted.get("tag", "")
 
+        # Format descriptive HUD terminal feedback
         if i_type == "hydration":
             msg = f"Purged {int(amt)}ml water"
         elif i_type == "hygiene":
@@ -692,9 +828,19 @@ class SubnauticaPDAGUI:
         self.log_terminal(f"TELEMETRY ROLLBACK: {msg}")
         self.refresh_display()
 
-        # Context-aware Alterra voice line
-        line = dialogues.get_rollback_line(i_type, tag)
+        # Context-aware Alterra voice line with safe fallback
+        try:
+            if hasattr(dialogues, "get_rollback_line"):
+                line = dialogues.get_rollback_line(i_type, tag)
+            else:
+                line = dialogues.get_dialogue("undo_intake")
+        except Exception:
+            line = "Telemetry rollback confirmed. Record purged from operational memory."
+
         threading.Thread(target=speak, args=(line, "pda"), daemon=True).start()
+
+    # Safety alias: guarantees tray menu & buttons work regardless of name used
+    action_undo_last = action_undo_intake
 
     def action_log_sleep_dialog(self):
         win = tk.Toplevel(self.root)
@@ -758,7 +904,7 @@ class SubnauticaPDAGUI:
         def save_and_close():
             try:
                 d_str = entry_date.get().strip()
-                wake_date = None
+                wake_date = datetime.strptime(d_str, fmt)
                 for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%Y/%m/%d"):
                     try:
                         wake_date = datetime.strptime(d_str, fmt)
@@ -813,13 +959,15 @@ class SubnauticaPDAGUI:
     def action_view_archives(self):
         win = tk.Toplevel(self.root)
         win.title("ALTERRA CORP // BIOMETRIC ARCHIVES & TELEMETRY LOGS")
-        win.geometry("860x560")
+        win.geometry("920x580")
         win.configure(bg=PANEL_BG)
 
         threading.Thread(target=speak, args=(dialogues.get_archive_viewed_line(), "pda"), daemon=True).start()
 
         archive_scope = {"days": 7}
+        loaded_tabs = set()  # Tracks which tabs have loaded data to eliminate lag
 
+        # --- TOP FILTER BAR ---
         header_bar = tk.Frame(win, bg=PANEL_BG, padx=12, pady=8)
         header_bar.pack(fill="x")
 
@@ -843,20 +991,22 @@ class SubnauticaPDAGUI:
         lbl_scope_status = tk.Label(header_bar, text="Viewing rolling 7-day operational cycle", font=("Consolas", 8, "italic"), fg=CYAN_DIM, bg=PANEL_BG)
         lbl_scope_status.pack(side="right", padx=5)
 
+        # --- THEME INJECTION (DARK SUBNAUTICA PALETTE) ---
         style = ttk.Style()
         if "clam" in style.theme_names():
             style.theme_use("clam")
 
         style.configure("TNotebook", background=PANEL_BG, borderwidth=0)
-        style.configure("TNotebook.Tab", background="#0c202d", foreground=TEXT_LIGHT, font=("Consolas", 10, "bold"), padding=[12, 5])
+        style.configure("TNotebook.Tab", background="#0c202d", foreground=TEXT_LIGHT, font=("Consolas", 9, "bold"), padding=[10, 5])
         style.map("TNotebook.Tab", background=[("selected", CYAN_DIM)], foreground=[("selected", "#ffffff")])
 
+        # Treeview Oceanic Dark Theme
         style.configure(
             "PDA.Treeview",
-            background="#081620",
-            foreground=TEXT_LIGHT,
+            background="#06131c",
+            foreground="#c8e4f0",
             fieldbackground="#040b11",
-            rowheight=26,
+            rowheight=25,
             font=("Consolas", 9),
             borderwidth=0
         )
@@ -880,67 +1030,104 @@ class SubnauticaPDAGUI:
         notebook = ttk.Notebook(win)
         notebook.pack(fill="both", expand=True, padx=12, pady=(4, 5))
 
-        # TAB 1: SLEEP LOGS
+        # --- TAB 1: SLEEP & REST TELEMETRY ---
         tab_sleep = tk.Frame(notebook, bg=PANEL_BG)
-        notebook.add(tab_sleep, text="SLEEP TELEMETRY")
+        notebook.add(tab_sleep, text="SLEEP CYCLES")
 
         s_cols = ("id", "sleep_time", "wake_time", "duration", "disruptions", "notes")
         tree_sleep = ttk.Treeview(tab_sleep, columns=s_cols, show="headings", height=13, style="PDA.Treeview")
         tree_sleep.heading("id", text="ID")
-        tree_sleep.heading("sleep_time", text="Sleep Onset (DD/MM/YYYY)")
-        tree_sleep.heading("wake_time", text="Wake Time (DD/MM/YYYY)")
+        tree_sleep.heading("sleep_time", text="Sleep Onset")
+        tree_sleep.heading("wake_time", text="Wake Time")
         tree_sleep.heading("duration", text="Duration (h)")
         tree_sleep.heading("disruptions", text="Disruptions")
         tree_sleep.heading("notes", text="Diagnostic Notes")
 
-        tree_sleep.column("id", width=50, anchor="center")
-        tree_sleep.column("sleep_time", width=160, anchor="center")
-        tree_sleep.column("wake_time", width=160, anchor="center")
-        tree_sleep.column("duration", width=90, anchor="center")
-        tree_sleep.column("disruptions", width=90, anchor="center")
+        tree_sleep.column("id", width=45, anchor="center")
+        tree_sleep.column("sleep_time", width=175, anchor="center")
+        tree_sleep.column("wake_time", width=175, anchor="center")
+        tree_sleep.column("duration", width=85, anchor="center")
+        tree_sleep.column("disruptions", width=85, anchor="center")
         tree_sleep.column("notes", width=220, anchor="w")
-        tree_sleep.pack(fill="both", expand=True, padx=8, pady=8)
+        tree_sleep.pack(fill="both", expand=True, padx=6, pady=6)
 
-        # TAB 2: INTAKE & HYGIENE LOGS
+        # --- TAB 2: METABOLIC INTAKE ---
         tab_intake = tk.Frame(notebook, bg=PANEL_BG)
-        notebook.add(tab_intake, text="INTAKE & HYGIENE")
+        notebook.add(tab_intake, text="METABOLIC INTAKE")
 
         i_cols = ("id", "type", "amount", "tag", "logged_at")
         tree_intake = ttk.Treeview(tab_intake, columns=i_cols, show="headings", height=13, style="PDA.Treeview")
         tree_intake.heading("id", text="ID")
         tree_intake.heading("type", text="Type")
-        tree_intake.heading("amount", text="Amount")
+        tree_intake.heading("amount", text="Volume / Qty")
         tree_intake.heading("tag", text="Description")
-        tree_intake.heading("logged_at", text="Timestamp (DD/MM/YYYY)")
+        tree_intake.heading("logged_at", text="Timestamp")
 
-        tree_intake.column("id", width=50, anchor="center")
-        tree_intake.column("type", width=90, anchor="center")
-        tree_intake.column("amount", width=80, anchor="center")
-        tree_intake.column("tag", width=160, anchor="w")
+        tree_intake.column("id", width=45, anchor="center")
+        tree_intake.column("type", width=95, anchor="center")
+        tree_intake.column("amount", width=95, anchor="center")
+        tree_intake.column("tag", width=180, anchor="w")
         tree_intake.column("logged_at", width=180, anchor="center")
-        tree_intake.pack(fill="both", expand=True, padx=8, pady=8)
+        tree_intake.pack(fill="both", expand=True, padx=6, pady=6)
 
-        # TAB 3: LIFETIME TELEMETRY OVERVIEW
+        # --- TAB 3: HYGIENE PROTOCOLS ---
+        tab_hygiene = tk.Frame(notebook, bg=PANEL_BG)
+        notebook.add(tab_hygiene, text="HYGIENE PROTOCOLS")
+
+        h_cols = ("id", "tag", "status", "logged_at")
+        tree_hygiene = ttk.Treeview(tab_hygiene, columns=h_cols, show="headings", height=13, style="PDA.Treeview")
+        tree_hygiene.heading("id", text="ID")
+        tree_hygiene.heading("tag", text="Protocol")
+        tree_hygiene.heading("status", text="Compliance")
+        tree_hygiene.heading("logged_at", text="Timestamp")
+
+        tree_hygiene.column("id", width=50, anchor="center")
+        tree_hygiene.column("tag", width=160, anchor="center")
+        tree_hygiene.column("status", width=140, anchor="center")
+        tree_hygiene.column("logged_at", width=190, anchor="center")
+        tree_hygiene.pack(fill="both", expand=True, padx=6, pady=6)
+
+        # --- TAB 4: EXERCISE & NAPS ---
+        tab_exertion = tk.Frame(notebook, bg=PANEL_BG)
+        notebook.add(tab_exertion, text="EXERCISE & NAPS")
+
+        e_cols = ("id", "type", "load", "intensity", "logged_at")
+        tree_exertion = ttk.Treeview(tab_exertion, columns=e_cols, show="headings", height=13, style="PDA.Treeview")
+        tree_exertion.heading("id", text="ID")
+        tree_exertion.heading("type", text="Category")
+        tree_exertion.heading("load", text="Duration")
+        tree_exertion.heading("intensity", text="Intensity / Notes")
+        tree_exertion.heading("logged_at", text="Timestamp")
+
+        tree_exertion.column("id", width=50, anchor="center")
+        tree_exertion.column("type", width=120, anchor="center")
+        tree_exertion.column("load", width=95, anchor="center")
+        tree_exertion.column("intensity", width=180, anchor="w")
+        tree_exertion.column("logged_at", width=190, anchor="center")
+        tree_exertion.pack(fill="both", expand=True, padx=6, pady=6)
+
+        # --- TAB 5: LIFETIME SUMMARY ---
         tab_lifetime = tk.Frame(notebook, bg=PANEL_BG)
         notebook.add(tab_lifetime, text="LIFETIME SUMMARY")
 
         lifetime_text = tk.Text(
-            tab_lifetime, bg="#02070b", fg=TEXT_LIGHT, font=("Consolas", 10),
+            tab_lifetime, bg="#040b11", fg=TEXT_LIGHT, font=("Consolas", 9),
             bd=1, relief="solid", highlightthickness=1, highlightbackground=PANEL_BORDER,
-            padx=16, pady=16
+            padx=14, pady=14
         )
-        lifetime_text.pack(fill="both", expand=True, padx=8, pady=8)
+        lifetime_text.pack(fill="both", expand=True, padx=6, pady=6)
 
+        # --- INDIVIDUAL TAB DATA LOADERS ---
         def populate_sleep():
             for row in tree_sleep.get_children():
                 tree_sleep.delete(row)
-            sleep_data = database.get_all_sleep_history(days=archive_scope["days"], order="desc")
-            for r in sleep_data:
+            data = db.get_all_sleep_history(days=archive_scope["days"], order="desc")
+            for r in data:
                 tree_sleep.insert("", "end", values=(
                     r.get("id"),
-                    format_date_dmy(r.get("sleep_time")),
-                    format_date_dmy(r.get("wake_time")),
-                    f"{r.get('duration_hours', 0.0):.1f}",
+                    time_sync.format_date_dmy(r.get("sleep_time")),
+                    time_sync.format_date_dmy(r.get("wake_time")),
+                    f"{float(r.get('duration_hours', 0.0)):.1f}",
                     r.get("interruptions", 0),
                     r.get("quality_notes", "")
                 ))
@@ -948,51 +1135,109 @@ class SubnauticaPDAGUI:
         def populate_intake():
             for row in tree_intake.get_children():
                 tree_intake.delete(row)
-            intake_data = database.get_all_intake_history(days=archive_scope["days"], order="desc")
-            for r in intake_data:
-                t = r.get("type", "")
+            data = db.get_all_intake_history(days=archive_scope["days"], order="desc")
+            for r in data:
+                t = str(r.get("type", "")).lower()
                 if t == "hydration":
                     amt_str = f"{int(r.get('amount', 0))}ml"
                 elif t == "hygiene":
                     amt_str = "Completed"
                 else:
-                    amt_str = f"{r.get('amount', 1)} meal"
+                    amt_str = f"{int(r.get('amount', 1))} meal"
                 tree_intake.insert("", "end", values=(
                     r.get("id"),
                     t.upper(),
                     amt_str,
                     r.get("tag", ""),
-                    format_date_dmy(r.get("logged_at"))
+                    time_sync.format_date_dmy(r.get("logged_at"))
+                ))
+
+        def populate_hygiene():
+            for row in tree_hygiene.get_children():
+                tree_hygiene.delete(row)
+            data = db.get_all_hygiene_history(days=archive_scope["days"], order="desc")
+            for r in data:
+                tree_hygiene.insert("", "end", values=(
+                    r.get("id"),
+                    str(r.get("tag", "")).upper(),
+                    "COMPLETED",
+                    time_sync.format_date_dmy(r.get("logged_at"))
+                ))
+
+        def populate_exertion():
+            for row in tree_exertion.get_children():
+                tree_exertion.delete(row)
+            ex_data = db.get_all_exercise_history(days=archive_scope["days"], order="desc")
+            for r in ex_data:
+                tree_exertion.insert("", "end", values=(
+                    r.get("id"),
+                    "WORKOUT",
+                    f"{float(r.get('duration_hours', 0.0)):.1f}h",
+                    f"{r.get('intensity', 'moderate')} {r.get('notes', '')}".strip(),
+                    time_sync.format_date_dmy(r.get("logged_at"))
+                ))
+            nap_data = db.get_all_nap_history(days=archive_scope["days"], order="desc")
+            for r in nap_data:
+                tree_exertion.insert("", "end", values=(
+                    r.get("id"),
+                    "RECOVERY NAP",
+                    f"{int(r.get('duration_minutes', 0))}m",
+                    r.get("notes", "Daytime Recovery"),
+                    time_sync.format_date_dmy(r.get("logged_at"))
                 ))
 
         def populate_lifetime():
-            import analytics_engine
-            data = analytics_engine.get_lifetime_summary()
-            first_day_dmy = format_date_dmy(data.get('first_day', ''), include_time=False)
-            report = (
-                "==========================================================\n"
-                "       ALTERRA CORP // LIFETIME TELEMETRY ARCHIVE         \n"
-                "==========================================================\n\n"
-                f"  * Telemetry Genesis:          {first_day_dmy}\n"
-                f"  * Total Active Days Monitored:{data['days_logged']} cycles\n\n"
-                "  [ HYDRATION COMPLIANCE ]\n"
-                f"  * Total Volume Assimilated:   {int(data['total_water_ml'])} ml\n"
-                f"  * Mean Daily Hydration:       {data['avg_water_daily']} ml / day\n\n"
-                "  [ NUTRITIONAL TELEMETRY ]\n"
-                f"  * Total Meals Logged:         {data['total_meals']} rations\n"
-                f"  * Mean Daily Sustenance:      {data['avg_meals_daily']} meals / day\n\n"
-                "  [ CELLULAR REST & REPAIR ]\n"
-                f"  * Total Rest Cycles Recorded: {data['total_sleep_cycles']}\n"
-                f"  * Total Time Unconscious:     {data['total_sleep_hours']} hours\n"
-                f"  * Lifetime Average Duration:  {data['avg_sleep_hours']} hours / cycle\n\n"
-                "==========================================================\n"
-                "Status: Historical archives synchronized to terminal baseline.\n"
-            )
-            lifetime_text.delete("1.0", "end")
-            lifetime_text.insert("end", report)
+            try:
+                import analytics_engine
+                data = analytics_engine.get_lifetime_summary()
+                first_day_dmy = time_sync.format_date_dmy(data.get('first_day', ''), include_time=False)
+                report = (
+                    "==========================================================\n"
+                    "       ALTERRA CORP // LIFETIME TELEMETRY ARCHIVE         \n"
+                    "==========================================================\n\n"
+                    f"  * Telemetry Genesis:          {first_day_dmy}\n"
+                    f"  * Total Active Days Monitored:{data['days_logged']} cycles\n\n"
+                    "  [ HYDRATION COMPLIANCE ]\n"
+                    f"  * Total Volume Assimilated:   {int(data['total_water_ml'])} ml\n"
+                    f"  * Mean Daily Hydration:       {data['avg_water_daily']} ml / day\n\n"
+                    "  [ NUTRITIONAL TELEMETRY ]\n"
+                    f"  * Total Meals Logged:         {data['total_meals']} rations\n"
+                    f"  * Mean Daily Sustenance:      {data['avg_meals_daily']} meals / day\n\n"
+                    "  [ CELLULAR REST & REPAIR ]\n"
+                    f"  * Total Rest Cycles Recorded: {data['total_sleep_cycles']}\n"
+                    f"  * Total Time Unconscious:     {data['total_sleep_hours']} hours\n"
+                    f"  * Lifetime Average Duration:  {data['avg_sleep_hours']} hours / cycle\n\n"
+                    "==========================================================\n"
+                    "Status: Historical archives synchronized to terminal baseline.\n"
+                )
+                lifetime_text.delete("1.0", "end")
+                lifetime_text.insert("end", report)
+            except Exception as e:
+                lifetime_text.delete("1.0", "end")
+                lifetime_text.insert("end", f"Lifetime telemetry summary unavailable: {e}")
+
+        # --- INSTANT LAZY LOADING DISPATCHER ---
+        def load_current_tab(force=False):
+            cur = notebook.index(notebook.select())
+            if not force and cur in loaded_tabs:
+                return
+            if cur == 0:
+                populate_sleep()
+            elif cur == 1:
+                populate_intake()
+            elif cur == 2:
+                populate_hygiene()
+            elif cur == 3:
+                populate_exertion()
+            elif cur == 4:
+                populate_lifetime()
+            loaded_tabs.add(cur)
+
+        notebook.bind("<<NotebookTabChanged>>", lambda e: load_current_tab())
 
         def switch_scope(scope_days):
             archive_scope["days"] = scope_days
+            loaded_tabs.clear()  # Invalidate cache
             if scope_days == 7:
                 btn_scope_7d.config(bg="#0e2838", fg=CYAN_BRIGHT)
                 btn_scope_all.config(bg="#0c202d", fg=TEXT_MUTED)
@@ -1001,57 +1246,63 @@ class SubnauticaPDAGUI:
                 btn_scope_7d.config(bg="#0c202d", fg=TEXT_MUTED)
                 btn_scope_all.config(bg="#0e2838", fg=CYAN_BRIGHT)
                 lbl_scope_status.config(text="Viewing all historical entries since day 1")
-            populate_sleep()
-            populate_intake()
+            load_current_tab(force=True)
 
         btn_scope_7d.config(command=lambda: switch_scope(7))
         btn_scope_all.config(command=lambda: switch_scope(None))
 
-        populate_sleep()
-        populate_intake()
-        populate_lifetime()
+        # Initial load: only load Tab 0
+        load_current_tab(force=True)
 
-        bar_actions = tk.Frame(win, bg=PANEL_BG, pady=8, padx=12)
+        # --- BOTTOM ACTION BAR ---
+        bar_actions = tk.Frame(win, bg=PANEL_BG, pady=6, padx=12)
         bar_actions.pack(fill="x")
 
         def delete_selected():
             cur_tab = notebook.index(notebook.select())
-            if cur_tab == 2:
-                messagebox.showinfo("Telemetry Summary", "The Lifetime Summary is an aggregate view. Delete entries from Sleep or Intake tabs.")
+            table_map = {
+                0: (tree_sleep, "sleep_logs"),
+                1: (tree_intake, "intake_logs"),
+                2: (tree_hygiene, "hygiene_logs"),
+                3: (tree_exertion, "exercise_logs")
+            }
+
+            if cur_tab not in table_map:
+                messagebox.showinfo("Telemetry Summary", "The Lifetime Summary is an aggregate view. Select records from specific log tabs to delete.")
                 return
 
-            target_tree = tree_sleep if cur_tab == 0 else tree_intake
-            target_table = "sleep_logs" if cur_tab == 0 else "intake_logs"
-
+            target_tree, target_table = table_map[cur_tab]
             selected = target_tree.selection()
             if not selected:
-                messagebox.showwarning("Selection Required", "Select a telemetry record from the table to delete.")
+                messagebox.showwarning("Selection Required", "Select a telemetry record from the table to expunge.")
                 return
 
             rec_id = target_tree.item(selected[0])["values"][0]
-            confirm = messagebox.askyesno("Alterra Protocol Override", f"Confirm permanent deletion of record ID #{rec_id} from {target_table}?")
+            if cur_tab == 3:
+                cat = str(target_tree.item(selected[0])["values"][1]).upper()
+                target_table = "nap_logs" if "NAP" in cat else "exercise_logs"
+
+            confirm = messagebox.askyesno("Alterra Protocol Override", f"Confirm permanent deletion of record #{rec_id} from {target_table}?")
             if confirm:
-                if database.delete_record_by_id(target_table, rec_id):
-                    self.log_terminal(f"ARCHIVE OVERRIDE: Expunged record ID #{rec_id} from {target_table}.")
-                    populate_sleep()
-                    populate_intake()
-                    populate_lifetime()
+                if db.delete_record_by_id(target_table, rec_id):
+                    self.log_terminal(f"ARCHIVE OVERRIDE: Expunged record #{rec_id} from {target_table}.")
+                    load_current_tab(force=True)
                     self.refresh_display()
                 else:
                     messagebox.showerror("Deletion Error", "Could not remove record from cloud/local storage.")
 
         btn_del = tk.Button(
-            bar_actions, text="EXPUNGE SELECTED RECORD", font=("Consolas", 9, "bold"),
+            bar_actions, text="EXPUNGE SELECTED RECORD", font=("Consolas", 8, "bold"),
             bg="#2a0d12", fg="#ff4455", activebackground="#45121c", activeforeground="#ffffff",
             bd=1, relief="ridge", padx=10, pady=5, cursor="hand2", command=delete_selected
         )
         btn_del.pack(side="left")
 
         btn_refresh = tk.Button(
-            bar_actions, text="REFRESH DATABASE", font=("Consolas", 9, "bold"),
+            bar_actions, text="REFRESH DATABASE", font=("Consolas", 8, "bold"),
             bg="#0e2838", fg=CYAN_BRIGHT, activebackground=CYAN_DIM, activeforeground="#ffffff",
             bd=1, relief="ridge", padx=10, pady=5, cursor="hand2",
-            command=lambda: (populate_sleep(), populate_intake(), populate_lifetime())
+            command=lambda: load_current_tab(force=True)
         )
         btn_refresh.pack(side="right")
 
@@ -1115,36 +1366,74 @@ class SubnauticaPDAGUI:
 
         # Shower Frequency Dropdown
         tk.Label(body, text="Shower Frequency:", font=("Consolas", 9), fg=TEXT_LIGHT, bg=PANEL_BG).grid(row=row, column=0, sticky="w", pady=2)
-        combo_shower = ttk.Combobox(body, values=["Daily", "Every alternative Day"], width=16, state="readonly")
+        combo_shower = ttk.Combobox(body, values=["Daily", "Every Alternative Day"], width=16, state="readonly")
         combo_shower.set(str(cfg.get("shower_frequency", "Daily")))
         combo_shower.grid(row=row, column=1, sticky="w", pady=2)
         row += 1
 
         # 2. Standby / Sleep Silencing Window
-        add_section("STANDBY / SLEEP SILENCING WINDOW (24H HH:MM)")
+        add_section("STANDBY / SLEEP SILENCING WINDOW")
+
+        # Helper: Convert stored 24h integer to 12h string and AM/PM
+        def to_12h_parts(h24: int, m: int):
+            ampm = "PM" if h24 >= 12 else "AM"
+            h12 = h24 % 12
+            if h12 == 0:
+                h12 = 12
+            return f"{h12:02d}", f"{m:02d}", ampm
+
+        # Helper: Parse 12h + AM/PM back to 24h
+        def to_24h(h_str: str, m_str: str, ampm: str):
+            h = int(h_str.strip())
+            m = int(m_str.strip())
+            if h < 1 or h > 12 or m < 0 or m > 59:
+                raise ValueError("Hours must be 1-12 and minutes 0-59.")
+            if ampm == "PM" and h != 12:
+                h += 12
+            elif ampm == "AM" and h == 12:
+                h = 0
+            return h, m
+
+        # Sleep Start (e.g. 11:00 PM)
+        s_h12, s_m12, s_ampm = to_12h_parts(
+            cfg.get("sleep_start_hour", 23),
+            cfg.get("sleep_start_minute", 0)
+        )
 
         f_sleep_start = tk.Frame(body, bg=PANEL_BG)
-        tk.Label(body, text="Sleep Inactive Start:", font=("Consolas", 9), fg=TEXT_LIGHT, bg=PANEL_BG).grid(row=row, column=0, sticky="w", pady=2)
+        tk.Label(body, text="Sleep Inactive Start:", font=("Consolas", 9), fg=TEXT_LIGHT, bg=PANEL_BG).grid(row=row, column=0, sticky="w", pady=3)
         ent_ss_h = tk.Entry(f_sleep_start, font=("Consolas", 9), bg="#02070b", fg=CYAN_BRIGHT, insertbackground=CYAN_BRIGHT, insertwidth=2, width=4)
-        ent_ss_h.insert(0, f"{cfg.get('sleep_start_hour', 23):02d}")
+        ent_ss_h.insert(0, s_h12)
         ent_ss_h.pack(side="left")
-        tk.Label(f_sleep_start, text=":", fg=CYAN_BRIGHT, bg=PANEL_BG).pack(side="left")
+        tk.Label(f_sleep_start, text=":", fg=CYAN_BRIGHT, bg=PANEL_BG).pack(side="left", padx=1)
         ent_ss_m = tk.Entry(f_sleep_start, font=("Consolas", 9), bg="#02070b", fg=CYAN_BRIGHT, insertbackground=CYAN_BRIGHT, insertwidth=2, width=4)
-        ent_ss_m.insert(0, f"{cfg.get('sleep_start_minute', 0):02d}")
-        ent_ss_m.pack(side="left")
-        f_sleep_start.grid(row=row, column=1, sticky="w", pady=2)
+        ent_ss_m.insert(0, s_m12)
+        ent_ss_m.pack(side="left", padx=(0, 4))
+        combo_ss_ampm = ttk.Combobox(f_sleep_start, values=["PM", "AM"], width=4, state="readonly", font=("Consolas", 9))
+        combo_ss_ampm.set(s_ampm)
+        combo_ss_ampm.pack(side="left")
+        f_sleep_start.grid(row=row, column=1, sticky="w", pady=3)
         row += 1
 
+        # Wake Resume (e.g. 07:00 AM)
+        w_h12, w_m12, w_ampm = to_12h_parts(
+            cfg.get("sleep_end_hour", 7),
+            cfg.get("sleep_end_minute", 0)
+        )
+
         f_sleep_end = tk.Frame(body, bg=PANEL_BG)
-        tk.Label(body, text="Wake Active Resume:", font=("Consolas", 9), fg=TEXT_LIGHT, bg=PANEL_BG).grid(row=row, column=0, sticky="w", pady=2)
+        tk.Label(body, text="Wake Active Resume:", font=("Consolas", 9), fg=TEXT_LIGHT, bg=PANEL_BG).grid(row=row, column=0, sticky="w", pady=3)
         ent_se_h = tk.Entry(f_sleep_end, font=("Consolas", 9), bg="#02070b", fg=CYAN_BRIGHT, insertbackground=CYAN_BRIGHT, insertwidth=2, width=4)
-        ent_se_h.insert(0, f"{cfg.get('sleep_end_hour', 7):02d}")
+        ent_se_h.insert(0, w_h12)
         ent_se_h.pack(side="left")
-        tk.Label(f_sleep_end, text=":", fg=CYAN_BRIGHT, bg=PANEL_BG).pack(side="left")
+        tk.Label(f_sleep_end, text=":", fg=CYAN_BRIGHT, bg=PANEL_BG).pack(side="left", padx=1)
         ent_se_m = tk.Entry(f_sleep_end, font=("Consolas", 9), bg="#02070b", fg=CYAN_BRIGHT, insertbackground=CYAN_BRIGHT, insertwidth=2, width=4)
-        ent_se_m.insert(0, f"{cfg.get('sleep_end_minute', 0):02d}")
-        ent_se_m.pack(side="left")
-        f_sleep_end.grid(row=row, column=1, sticky="w", pady=2)
+        ent_se_m.insert(0, w_m12)
+        ent_se_m.pack(side="left", padx=(0, 4))
+        combo_se_ampm = ttk.Combobox(f_sleep_end, values=["AM", "PM"], width=4, state="readonly", font=("Consolas", 9))
+        combo_se_ampm.set(w_ampm)
+        combo_se_ampm.pack(side="left")
+        f_sleep_end.grid(row=row, column=1, sticky="w", pady=3)
         row += 1
 
         # 3. Environment & Persistence Engine
@@ -1180,6 +1469,10 @@ class SubnauticaPDAGUI:
 
         def commit_settings():
             try:
+                # Parse 12-hour values back into 24-hour integers for config persistence
+                ss_h, ss_m = to_24h(ent_ss_h.get(), ent_ss_m.get(), combo_ss_ampm.get())
+                se_h, se_m = to_24h(ent_se_h.get(), ent_se_m.get(), combo_se_ampm.get())
+
                 selected_tz_label = combo_tz.get()
                 resolved_iana_tz = TIMEZONE_MAP.get(selected_tz_label, "UTC")
 
@@ -1194,20 +1487,20 @@ class SubnauticaPDAGUI:
                     "meal_interval_min": int(ent_m_int.get().strip()),
                     "target_brushing": int(combo_brush.get().strip()),
                     "shower_frequency": combo_shower.get().strip(),
-                    "sleep_start_hour": int(ent_ss_h.get().strip()),
-                    "sleep_start_minute": int(ent_ss_m.get().strip()),
-                    "sleep_end_hour": int(ent_se_h.get().strip()),
-                    "sleep_end_minute": int(ent_se_m.get().strip())
+                    "sleep_start_hour": ss_h,
+                    "sleep_start_minute": ss_m,
+                    "sleep_end_hour": se_h,
+                    "sleep_end_minute": se_m
                 }
 
                 config_manager.save_config(new_cfg)
                 self.hud.reload_config()
                 self.refresh_display()
-                self.log_terminal("CONFIG OVERRIDE: Bio-parameters, hygiene targets, and timezone updated.")
+                self.log_terminal("CONFIG OVERRIDE: Bio-parameters, 12h sleep windows, and targets committed.")
                 messagebox.showinfo("Alterra PDA", "Biometric targets and system configuration saved successfully.")
                 win.destroy()
             except ValueError as ve:
-                messagebox.showerror("Format Error", f"Numeric value invalid: {ve}")
+                messagebox.showerror("Format Error", f"Invalid time or numerical entry: {ve}")
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to commit configuration: {e}")
 

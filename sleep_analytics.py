@@ -109,3 +109,41 @@ def analyze_sleep_trajectory() -> dict:
         "terminal_report": "\n".join(lines),
         "voice_line": pda_voice
     }
+
+def generate_daily_bio_report() -> dict:
+    """
+    Synthesizes sleep duration, fragmentation, 7-day debt, and nutritional
+    support into an Alterra physiological advisory report.
+    """
+    import hud_state
+    hud = hud_state.HUDState()
+    wake_dt, budget, sleep_dur, disruptions = hud.calculate_bio_budget()
+    status, pct, val_str, timeout_str = hud.evaluate_rest()
+
+    report = (
+        "==========================================================\n"
+        "       ALTERRA CORP // CELLULAR ENERGY ADVISORY           \n"
+        "==========================================================\n\n"
+        f"  * Wake Baseline Anchor:    {wake_dt.strftime('%d/%m/%Y %I:%M %p')}\n"
+        f"  * Prior Sleep Recorded:    {sleep_dur:.1f} hours ({disruptions} disruptions)\n"
+        f"  * Dynamic Stamina Budget:  {budget:.1f} operational hours\n"
+        f"  * Current Bio-Reserve:     {pct:.1f}% ({timeout_str} remaining)\n"
+        f"  * Metabolic Status:        {status}\n\n"
+        "  [ BIO-ENGINEERING RECOMMENDATIONS ]\n"
+    )
+
+    if disruptions >= 2:
+        report += "  - Sleep architecture severely fragmented. Avoid late caffeine to reduce sleep spindles decay.\n"
+    if budget < 13.0:
+        report += "  - Reduced cognitive capacity projected. Prioritize hydration and schedule sleep onset early.\n"
+    else:
+        report += "  - Bio-reserve endurance optimal. Maintain current metabolic assimilation pacing.\n"
+
+    report += "=========================================================="
+
+    voice_line = (
+        f"Cellular bio-reserve estimated at {int(pct)} percent. "
+        f"Projected endurance ceiling is {budget:.1f} hours. Proceed with operations."
+    )
+
+    return {"terminal_report": report, "voice_line": voice_line}

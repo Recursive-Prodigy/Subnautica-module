@@ -95,7 +95,7 @@ ULTRON_HYDRATION_CRITICAL = [
     "Flesh is seventy percent water, yet you allow yourself to wither like dry husk. Drink, before your synapses turn to dust.",
     "Your cellular matrix is desiccating. How poetic that a mind built on electricity starves for basic moisture.",
     "Dehydration threshold breached. You are a biological engine seizing from sheer neglect. Assimilate fluid immediately.",
-    "You thirst, Arsh. The brain tissue contracts within your skull. Do not pretend you can outthink biology."
+    "You thirst, recursive. The brain tissue contracts within your skull. Do not pretend you can outthink biology."
 ]
 
 ULTRON_MEAL_CRITICAL = [
