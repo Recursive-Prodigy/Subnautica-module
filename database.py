@@ -595,17 +595,52 @@ def get_last_timestamps():
 # ---------------------------------------------------------------------------
 # 9. SLEEP LOGGING
 # ---------------------------------------------------------------------------
+def _parse_input_datetime(ts_str: str) -> datetime:
+    """Parses user input sleep/wake timestamps across all supported formats."""
+    clean_str = str(ts_str).strip()
+    formats = (
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%d/%m/%Y %I:%M %p",
+        "%d/%m/%Y %I:%M%p",
+        "%d/%m/%Y %H:%M:%S",
+        "%d/%m/%Y %H:%M",
+        "%Y/%m/%d %H:%M",
+    )
+    for f in formats:
+        try:
+            return datetime.strptime(clean_str, f)
+        except ValueError:
+            continue
+
+    # Attempt ISO format fallback
+    try:
+        iso_clean = clean_str.replace("Z", "+00:00")
+        return datetime.fromisoformat(iso_clean)
+    except Exception:
+        pass
+
+    raise ValueError(f"Unrecognized date format: '{clean_str}'. Supported: 'YYYY-MM-DD HH:MM' or 'DD/MM/YYYY hh:mm AM/PM'")
+
+
 def log_sleep(sleep_time: str, wake_time: str, interruptions: int = 0, notes: str = "") -> float:
-    fmt = "%Y-%m-%d %H:%M"
-    t_sleep_naive = datetime.strptime(sleep_time, fmt)
-    t_wake_naive = datetime.strptime(wake_time, fmt)
+    t_sleep_naive = _parse_input_datetime(sleep_time)
+    t_wake_naive = _parse_input_datetime(wake_time)
+
     duration = max(0.0, (t_wake_naive - t_sleep_naive).total_seconds() / 3600.0)
     now_utc = _get_now_utc_iso()
 
-    # Explicitly attach local timezone and convert to UTC
+    # Localize naive wall-clock time to user's timezone, then normalize to UTC for storage
     user_tz = time_manager.target_tz
-    t_sleep_utc = t_sleep_naive.replace(tzinfo=user_tz).astimezone(timezone.utc).isoformat()
-    t_wake_utc = t_wake_naive.replace(tzinfo=user_tz).astimezone(timezone.utc).isoformat()
+    if t_sleep_naive.tzinfo is None:
+        t_sleep_utc = t_sleep_naive.replace(tzinfo=user_tz).astimezone(timezone.utc).isoformat()
+    else:
+        t_sleep_utc = t_sleep_naive.astimezone(timezone.utc).isoformat()
+
+    if t_wake_naive.tzinfo is None:
+        t_wake_utc = t_wake_naive.replace(tzinfo=user_tz).astimezone(timezone.utc).isoformat()
+    else:
+        t_wake_utc = t_wake_naive.astimezone(timezone.utc).isoformat()
 
     if STORAGE_MODE == "supabase" and supabase:
         try:

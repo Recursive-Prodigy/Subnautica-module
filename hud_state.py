@@ -6,6 +6,7 @@ import config_manager
 import time_sync
 from time_sync import time_manager
 
+
 def _parse_db_timestamp(ts_val):
     """
     Safely parses database timestamps with auto-healing for Supabase UTC drift.
@@ -13,7 +14,11 @@ def _parse_db_timestamp(ts_val):
     if not ts_val:
         return None
     if isinstance(ts_val, datetime):
-        return ts_val.astimezone(time_manager.target_tz) if ts_val.tzinfo else ts_val.replace(tzinfo=time_manager.target_tz)
+        return (
+            ts_val.astimezone(time_manager.target_tz)
+            if ts_val.tzinfo
+            else ts_val.replace(tzinfo=time_manager.target_tz)
+        )
 
     ts_str = str(ts_val).strip()
 
@@ -24,16 +29,18 @@ def _parse_db_timestamp(ts_val):
             dt = datetime.fromisoformat(clean)
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
-            
+
             local_dt = dt.astimezone(time_manager.target_tz)
             now = time_manager.now()
 
-            # Auto-healing: If Supabase treated naive local time as UTC, local_dt will be in the future!
+            # Auto-healing: If Supabase treated a naive local time as UTC, local_dt will be in the future
             if local_dt > now and (local_dt - now).total_seconds() < 21600:
                 naive_part = ts_str[:19].replace("T", " ")
                 for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
                     try:
-                        return datetime.strptime(naive_part, fmt).replace(tzinfo=time_manager.target_tz)
+                        return datetime.strptime(naive_part, fmt).replace(
+                            tzinfo=time_manager.target_tz
+                        )
                     except Exception:
                         pass
 
@@ -46,7 +53,7 @@ def _parse_db_timestamp(ts_val):
         "%Y-%m-%d %H:%M:%S",
         "%Y-%m-%d %H:%M",
         "%d/%m/%Y %H:%M:%S",
-        "%d/%m/%Y %H:%M"
+        "%d/%m/%Y %H:%M",
     )
     for fmt in formats:
         try:
@@ -106,11 +113,20 @@ class HUDState:
             pass
 
         if not last_dt:
-            wake_anchor = now.replace(hour=self.sleep_end_hour, minute=self.sleep_end_minute, second=0, microsecond=0)
+            wake_anchor = now.replace(
+                hour=self.sleep_end_hour,
+                minute=self.sleep_end_minute,
+                second=0,
+                microsecond=0,
+            )
             last_dt = wake_anchor if now >= wake_anchor else wake_anchor - timedelta(days=1)
 
         elapsed_min = max(0, int((now - last_dt).total_seconds() / 60.0))
-        status = "OVERDUE" if elapsed_min >= (self.hydration_interval_min * 2) else ("DUE" if elapsed_min >= self.hydration_interval_min else "OPTIMAL")
+        status = (
+            "OVERDUE"
+            if elapsed_min >= (self.hydration_interval_min * 2)
+            else ("DUE" if elapsed_min >= self.hydration_interval_min else "OPTIMAL")
+        )
         return status, elapsed_min
 
     def evaluate_nutrition(self):
@@ -130,13 +146,25 @@ class HUDState:
             pass
 
         if not last_dt:
-            wake_anchor = now.replace(hour=self.sleep_end_hour, minute=self.sleep_end_minute, second=0, microsecond=0)
+            wake_anchor = now.replace(
+                hour=self.sleep_end_hour,
+                minute=self.sleep_end_minute,
+                second=0,
+                microsecond=0,
+            )
             last_dt = wake_anchor if now >= wake_anchor else wake_anchor - timedelta(days=1)
 
         elapsed_min = max(0, int((now - last_dt).total_seconds() / 60.0))
-        status = "OVERDUE" if elapsed_min >= (self.meal_interval_min * 1.5) else ("DUE" if elapsed_min >= self.meal_interval_min else "OPTIMAL")
+        status = (
+            "OVERDUE"
+            if elapsed_min >= (self.meal_interval_min * 1.5)
+            else ("DUE" if elapsed_min >= self.meal_interval_min else "OPTIMAL")
+        )
         return status, elapsed_min
 
+    # -----------------------------------------------------------------------
+    # TWO-PROCESS CAPACITY ENGINE
+    # -----------------------------------------------------------------------
     def calculate_bio_budget(self):
         now = time_manager.now()
         wake_dt = None
@@ -154,9 +182,10 @@ class HUDState:
                 parsed_wake = _parse_db_timestamp(raw_wake)
                 parsed_sleep = _parse_db_timestamp(raw_sleep)
 
-                if parsed_wake and parsed_wake <= now:
+                # Tolerance: allow up to 120s of clock-skew/network latency
+                if parsed_wake and (parsed_wake - now).total_seconds() <= 120:
                     diff_sec = (now - parsed_wake).total_seconds()
-                    if diff_sec <= 86400:
+                    if -120 <= diff_sec <= 86400:
                         wake_dt = parsed_wake
                         sleep_dt = parsed_sleep
                         sleep_dur = float(latest.get("duration_hours", 8.0))
@@ -165,21 +194,26 @@ class HUDState:
             pass
 
         if not wake_dt:
-            wake_anchor = now.replace(hour=self.sleep_end_hour, minute=self.sleep_end_minute, second=0, microsecond=0)
+            wake_anchor = now.replace(
+                hour=self.sleep_end_hour,
+                minute=self.sleep_end_minute,
+                second=0,
+                microsecond=0,
+            )
             wake_dt = wake_anchor if now >= wake_anchor else wake_anchor - timedelta(days=1)
 
         base_budget = 16.0
 
-        # Duration Delta
+        # Factor A: Duration Delta
         if sleep_dur < 8.0:
             dur_mod = (sleep_dur - 8.0) * 1.25
         else:
             dur_mod = min(1.5, (sleep_dur - 8.0) * 0.5)
 
-        # Disruption Penalty (-0.5h per wake event)
+        # Factor B: Disruption Fragmentation Penalty
         dis_mod = -(disruptions * 0.5)
 
-        # Circadian Phase Misalignment
+        # Factor C: Circadian Bedtime Misalignment (Delayed Phase)
         circadian_mod = 0.0
         if sleep_dt:
             target_h = self.sleep_start_hour
@@ -191,7 +225,7 @@ class HUDState:
             if shift_delay > 1.5:
                 circadian_mod = -min(2.0, (shift_delay - 1.5) * 0.4)
 
-        # Sleep Regularity / Social Jetlag
+        # Factor D: Sleep Regularity / Social Jetlag (Variance in Wake Times)
         jetlag_mod = 0.0
         try:
             history = db.get_all_sleep_history(days=7, order="desc")
@@ -209,7 +243,7 @@ class HUDState:
         except Exception:
             pass
 
-        # Physical Exertion Drag
+        # Factor E: Physical Exertion Drag
         exercise_mod = 0.0
         try:
             ex_hours = db.get_today_exercise_hours()
@@ -218,7 +252,7 @@ class HUDState:
         except Exception:
             pass
 
-        # Nap Modifier
+        # Factor F: Nap Recovery vs Over-sleeping
         nap_mod = 0.0
         try:
             naps = db.get_today_naps()
@@ -233,7 +267,7 @@ class HUDState:
         except Exception:
             pass
 
-        # 7-Day Sleep Debt
+        # Factor G: 7-Day Cumulative Sleep Debt Drag
         debt_mod = 0.0
         try:
             import sleep_analytics
@@ -244,7 +278,7 @@ class HUDState:
         except Exception:
             pass
 
-        # Metabolic Modifiers
+        # Factor H: Metabolic Drag
         meta_mod = 0.0
         h_status, _ = self.evaluate_hydration()
         n_status, _ = self.evaluate_nutrition()
@@ -253,9 +287,26 @@ class HUDState:
         if n_status == "OVERDUE":
             meta_mod -= 0.5
 
-        total_budget = max(8.0, min(18.0, base_budget + dur_mod + dis_mod + circadian_mod + jetlag_mod + exercise_mod + nap_mod + debt_mod + meta_mod))
+        total_budget = max(
+            8.0,
+            min(
+                18.0,
+                base_budget
+                + dur_mod
+                + dis_mod
+                + circadian_mod
+                + jetlag_mod
+                + exercise_mod
+                + nap_mod
+                + debt_mod
+                + meta_mod,
+            ),
+        )
         return wake_dt, total_budget, sleep_dur, disruptions
 
+    # -----------------------------------------------------------------------
+    # TWO-PROCESS DECAY: EXPONENTIAL ADENOSINE & CIRCADIAN TROUGH
+    # -----------------------------------------------------------------------
     def evaluate_rest(self):
         now = time_manager.now()
         wake_dt, total_budget, sleep_dur, disruptions = self.calculate_bio_budget()
@@ -263,14 +314,17 @@ class HUDState:
         hours_awake = max(0.0, (now - wake_dt).total_seconds() / 3600.0)
         remaining_hours = total_budget - hours_awake
 
-        # Linear biological decay anchor
-        alertness_frac = max(0.0, min(1.0, 1.0 - (hours_awake / total_budget)))
+        # --- PROCESS S: Exponential Adenosine Accumulation ---
+        progress = min(1.0, hours_awake / total_budget) if total_budget > 0 else 1.0
+        base_alertness = max(0.0, 1.0 - (progress ** 1.35))
 
-        # Process C Afternoon Dip (7.0 - 9.0 hours post-wake)
-        is_circadian_dip = (7.0 <= hours_awake <= 9.0)
+        # --- PROCESS C: Circadian Afternoon Trough (7.0 - 9.0 hours post-wake) ---
+        is_circadian_dip = 7.0 <= hours_awake <= 9.0
         if is_circadian_dip:
             dip_penalty = 0.08 * (1.0 - abs(hours_awake - 8.0))
-            alertness_frac = max(0.0, alertness_frac - dip_penalty)
+            alertness_frac = max(0.0, base_alertness - dip_penalty)
+        else:
+            alertness_frac = base_alertness
 
         if is_circadian_dip:
             s_sub = "CIRCADIAN DIP"
