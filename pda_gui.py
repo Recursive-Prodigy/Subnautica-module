@@ -539,13 +539,16 @@ class SubnauticaPDAGUI:
         n_status, n_min = self.hud.evaluate_nutrition()
 
         w_ml = totals['water_ml']
-        w_tgt = self.hud.target_water_ml
+        # Dynamic exertion scaling: pulls +500ml/hr if workout logged today
+        w_tgt = self.hud.get_dynamic_hydration_target() if hasattr(self.hud, 'get_dynamic_hydration_target') else self.hud.target_water_ml
         m_cnt = totals['meals_count']
         m_tgt = self.hud.target_meals
 
+        # Dynamic exertion interval: pulls compressed interval (~50m) if exercised in last 3h
+        h_interval = self.hud.get_dynamic_hydration_interval() if hasattr(self.hud, 'get_dynamic_hydration_interval') else self.hud.hydration_interval_min
+
         # --- 1. CIRCULAR DECAY GAUGES ---
         # Water
-        h_interval = self.hud.hydration_interval_min
         w_frac = max(0.0, 1.0 - (h_min / h_interval)) if h_min != 999 else 0.0
         w_sub = f"{max(0, h_interval - h_min)}m left" if h_min < h_interval else f"+{h_min - h_interval}m over"
         self.gauge_water.set_data(fraction=w_frac, center_val=f"{int(w_ml)}ml", sub_val=w_sub, status=h_status)
@@ -556,7 +559,7 @@ class SubnauticaPDAGUI:
         n_sub = f"{max(0, m_interval - n_min)}m left" if n_min < m_interval else f"+{n_min - m_interval}m over"
         self.gauge_food.set_data(fraction=n_frac, center_val=f"{m_cnt}/{m_tgt}", sub_val=n_sub, status=n_status)
 
-       # --- SLEEP & BIO-ENERGY (Two-Process Bio-Energy Engine) ---
+        # --- SLEEP & BIO-ENERGY (Two-Process Bio-Energy Engine) ---
         alertness_frac, s_center, s_sub, s_status, is_dip = self.hud.evaluate_rest()
         self.gauge_sleep.set_data(
             fraction=alertness_frac,
@@ -564,7 +567,7 @@ class SubnauticaPDAGUI:
             sub_val=s_sub,
             status=s_status
         )
-        
+
         # --- 2. HYGIENE GAUGES (BRUSH & SHOWER) ---
         target_brush = int(cfg.get("target_brushing", 2))
         shower_freq = cfg.get("shower_frequency", "Daily")
@@ -604,7 +607,6 @@ class SubnauticaPDAGUI:
             sh_sub = "COMPLIANT" if sh_ok else "DUE TODAY"
             sh_status = "OPTIMAL" if sh_ok else "DUE"
         else:
-            # Every 2 / alternative Day
             sh_ok = (sh_days_ago <= 1)
             sh_frac = 1.0 if sh_ok else 0.0
             sh_center = "DONE" if sh_days_ago == 0 else ("NOMINAL" if sh_days_ago == 1 else "DUE")
@@ -623,13 +625,14 @@ class SubnauticaPDAGUI:
 
         # --- Linear Progress Bars ---
         w_pct = int((w_ml / w_tgt) * 100) if w_tgt else 0
-        self.lbl_water_vals.config(text=f"{int(w_ml)} / {w_tgt} ml ({w_pct}%)")
+        ex_tag = " [EXERTION LOAD]" if w_tgt > self.hud.target_water_ml else ""
+        self.lbl_water_vals.config(text=f"{int(w_ml)} / {w_tgt} ml ({w_pct}%){ex_tag}")
         self.lbl_water_status.config(text=h_status)
         h_color = SUCCESS_GREEN if h_status in ["OPTIMAL", "TARGET_REACHED"] else (WARN_AMBER if h_status == "DUE" else ALERT_RED)
         self.lbl_water_status.config(fg=h_color)
         self.water_bar.set_progress(w_ml, w_tgt, color=h_color)
         h_time_str = f"{h_min}m ago" if h_min != 999 else "Never"
-        self.lbl_water_timer.config(text=f"Last: {h_time_str} | Interval: {self.hud.hydration_interval_min}m")
+        self.lbl_water_timer.config(text=f"Last: {h_time_str} | Interval: {h_interval}m")
 
         m_pct = int((m_cnt / m_tgt) * 100) if m_tgt else 0
         self.lbl_food_vals.config(text=f"{m_cnt} / {m_tgt} Meals ({m_pct}%)")
@@ -644,7 +647,6 @@ class SubnauticaPDAGUI:
             self.lbl_system_mode.config(text="[ STANDBY - SLEEP CYCLE ]", fg=TEXT_MUTED)
         else:
             self.lbl_system_mode.config(text="[ TELEMETRY ACTIVE ]", fg=SUCCESS_GREEN)
-
     def poll_timers(self):
         self.refresh_display()
 

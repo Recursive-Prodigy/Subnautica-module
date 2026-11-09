@@ -96,6 +96,20 @@ class HUDState:
         else:
             return cur_min >= start_min or cur_min < end_min
 
+    def get_dynamic_hydration_interval(self) -> int:
+        """Returns compressed interval (~50m) if exercise logged in last 3 hours, else default 75m."""
+        now = time_manager.now()
+        effective_interval = self.hydration_interval_min
+        try:
+            recent_ex = db.get_all_exercise_history(days=1, order="desc")
+            if recent_ex:
+                latest_ex_dt = _parse_db_timestamp(recent_ex[0].get("logged_at"))
+                if latest_ex_dt and (now - latest_ex_dt).total_seconds() <= 10800:
+                    return max(35, int(self.hydration_interval_min * 0.65))
+        except Exception:
+            pass
+        return effective_interval
+
     def evaluate_hydration(self):
         now = time_manager.now()
         last_dt = None
@@ -122,10 +136,23 @@ class HUDState:
             last_dt = wake_anchor if now >= wake_anchor else wake_anchor - timedelta(days=1)
 
         elapsed_min = max(0, int((now - last_dt).total_seconds() / 60.0))
+
+        # Dynamic Exertion Coupling:
+        # If exercise logged within the last 3 hours, compress interval from 75m to 50m
+        effective_interval = self.hydration_interval_min
+        try:
+            recent_ex = db.get_all_exercise_history(days=1, order="desc")
+            if recent_ex:
+                latest_ex_dt = _parse_db_timestamp(recent_ex[0].get("logged_at"))
+                if latest_ex_dt and (now - latest_ex_dt).total_seconds() <= 10800:  # 3 hours
+                    effective_interval = max(35, int(self.hydration_interval_min * 0.65))
+        except Exception:
+            pass
+
         status = (
             "OVERDUE"
-            if elapsed_min >= (self.hydration_interval_min * 2)
-            else ("DUE" if elapsed_min >= self.hydration_interval_min else "OPTIMAL")
+            if elapsed_min >= (effective_interval * 2)
+            else ("DUE" if elapsed_min >= effective_interval else "OPTIMAL")
         )
         return status, elapsed_min
 

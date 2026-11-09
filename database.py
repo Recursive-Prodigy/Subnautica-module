@@ -3,6 +3,7 @@ import os
 import sqlite3
 from datetime import datetime, time, timezone, timedelta
 from time_sync import time_manager
+import threading
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "pda_config.json")
 LOCAL_DB_PATH = os.path.join(os.path.dirname(__file__), "pda_local.db")
@@ -111,6 +112,87 @@ def _init_local_db():
 # Always bootstrap local tables as a resilient offline backup
 _init_local_db()
 
+def prune_hot_cloud_cache(retention_days: int = 30):
+    """
+    Safely prunes records older than retention_days from Supabase,
+    ensuring they are preserved in the desktop SQLite vault first.
+    """
+    if STORAGE_MODE != "supabase" or not supabase:
+        return
+
+    cutoff_iso = (datetime.now(timezone.utc) - timedelta(days=retention_days)).isoformat()
+    tables = ("intake_logs", "hygiene_logs", "sleep_logs", "exercise_logs", "nap_logs")
+
+    for tbl in tables:
+        try:
+            res = supabase.table(tbl).select("*").lt("logged_at", cutoff_iso).execute()
+            old_records = res.data or []
+            if not old_records:
+                continue
+
+            conn = _get_sqlite_conn()
+            cur = conn.cursor()
+            for r in old_records:
+                ts = r.get("logged_at")
+                if tbl == "intake_logs":
+                    cur.execute("SELECT id FROM intake_logs WHERE logged_at = ?", (ts,))
+                    if not cur.fetchone():
+                        cur.execute(
+                            "INSERT INTO intake_logs (type, amount, tag, logged_at) VALUES (?, ?, ?, ?)",
+                            (r.get("type"), r.get("amount"), r.get("tag"), ts)
+                        )
+                elif tbl == "sleep_logs":
+                    cur.execute("SELECT id FROM sleep_logs WHERE logged_at = ?", (ts,))
+                    if not cur.fetchone():
+                        cur.execute(
+                            "INSERT INTO sleep_logs (sleep_time, wake_time, duration_hours, interruptions, quality_notes, logged_at) VALUES (?, ?, ?, ?, ?, ?)",
+                            (r.get("sleep_time"), r.get("wake_time"), r.get("duration_hours"), r.get("interruptions"), r.get("quality_notes"), ts)
+                        )
+                elif tbl == "exercise_logs":
+                    cur.execute("SELECT id FROM exercise_logs WHERE logged_at = ?", (ts,))
+                    if not cur.fetchone():
+                        cur.execute(
+                            "INSERT INTO exercise_logs (exercise_type, duration_hours, intensity, notes, logged_at) VALUES (?, ?, ?, ?, ?)",
+                            (r.get("exercise_type"), r.get("duration_hours"), r.get("intensity"), r.get("notes"), ts)
+                        )
+                elif tbl == "nap_logs":
+                    cur.execute("SELECT id FROM nap_logs WHERE logged_at = ?", (ts,))
+                    if not cur.fetchone():
+                        cur.execute(
+                            "INSERT INTO nap_logs (duration_minutes, notes, logged_at) VALUES (?, ?, ?)",
+                            (r.get("duration_minutes"), r.get("notes"), ts)
+                        )
+                elif tbl == "hygiene_logs":
+                    cur.execute("SELECT id FROM hygiene_logs WHERE logged_at = ?", (ts,))
+                    if not cur.fetchone():
+                        cur.execute(
+                            "INSERT INTO hygiene_logs (tag, logged_at) VALUES (?, ?)",
+                            (r.get("tag"), ts)
+                        )
+            conn.commit()
+            conn.close()
+
+            # Safely prune from cloud only after SQLite vault confirmation
+            supabase.table(tbl).delete().lt("logged_at", cutoff_iso).execute()
+            print(f"[ARCHIVER] Pruned {len(old_records)} cold entries from cloud table '{tbl}'.")
+        except Exception as e:
+            print(f"[ARCHIVER] Cloud prune notice on '{tbl}': {e}")
+
+
+def verify_remote_schemas():
+    """Triggers the automated HTTPS RPC schema sync on startup."""
+    if STORAGE_MODE == "supabase" and supabase:
+        try:
+            res = supabase.rpc("sync_pda_schemas", {}).execute()
+            print("[ALTERRA REMOTE] Remote schema verification:", res.data)
+        except Exception as e:
+            print(f"[ALTERRA REMOTE] Schema sync bypass: {e}")
+
+# Run remote schema verification
+    verify_remote_schemas()
+
+    # Launch background cold-vault archiver and cloud buffer prune
+    threading.Thread(target=prune_hot_cloud_cache, args=(30,), daemon=True).start()
 
 # ---------------------------------------------------------------------------
 # 3. TIMESTAMP CONVERTERS & HELPERS
@@ -624,13 +706,42 @@ def _parse_input_datetime(ts_str: str) -> datetime:
 
 
 def log_sleep(sleep_time: str, wake_time: str, interruptions: int = 0, notes: str = "") -> float:
-    t_sleep_naive = _parse_input_datetime(sleep_time)
-    t_wake_naive = _parse_input_datetime(wake_time)
+    """
+    Logs a completed sleep cycle into Supabase and local SQLite.
+    Safely parses both 24h (ISO/standard) and 12h AM/PM strings.
+    """
+    def parse_dt(raw_val: str) -> datetime:
+        clean = str(raw_val).strip()
+        supported_formats = (
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d %H:%M",
+            "%d/%m/%Y %I:%M %p",
+            "%d/%m/%Y %I:%M%p",
+            "%d/%m/%Y %H:%M:%S",
+            "%d/%m/%Y %H:%M",
+            "%Y/%m/%d %H:%M",
+        )
+        for pattern in supported_formats:
+            try:
+                return datetime.strptime(clean, pattern)
+            except ValueError:
+                continue
+
+        # ISO fallback
+        try:
+            return datetime.fromisoformat(clean.replace("Z", "+00:00"))
+        except Exception:
+            pass
+
+        raise ValueError(f"Invalid timestamp format: '{clean}'")
+
+    t_sleep_naive = parse_dt(sleep_time)
+    t_wake_naive = parse_dt(wake_time)
 
     duration = max(0.0, (t_wake_naive - t_sleep_naive).total_seconds() / 3600.0)
     now_utc = _get_now_utc_iso()
 
-    # Localize naive wall-clock time to user's timezone, then normalize to UTC for storage
+    # Localize wall-clock inputs into target timezone, then normalize to UTC ISO
     user_tz = time_manager.target_tz
     if t_sleep_naive.tzinfo is None:
         t_sleep_utc = t_sleep_naive.replace(tzinfo=user_tz).astimezone(timezone.utc).isoformat()
@@ -654,7 +765,7 @@ def log_sleep(sleep_time: str, wake_time: str, interruptions: int = 0, notes: st
             }).execute()
             return duration
         except Exception as e:
-            print(f"[SUPABASE OFFLINE] Falling back to local storage: {e}")
+            print(f"[SUPABASE OFFLINE] Diverting sleep log to local SQLite: {e}")
 
     conn = _get_sqlite_conn()
     cur = conn.cursor()
@@ -791,6 +902,7 @@ def get_all_nap_history(limit: int = None, days: int = None, order: str = "desc"
         ]
     except Exception:
         return []
+    
 
 def get_all_sleep_history(limit: int = None, days: int = None, order: str = "desc") -> list:
     descending = (order.lower() == "desc")
