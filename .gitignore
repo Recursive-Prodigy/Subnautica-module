@@ -40,3 +40,6 @@ piper/
 audio_cache/
 *.log
 ultron voice threshold*
+
+# Proprietary / Local Audio Assets
+sfx/*.wav

@@ -5,6 +5,7 @@ import threading
 from datetime import datetime, time, timezone, timedelta
 import tkinter as tk
 from tkinter import ttk, messagebox
+import sfx_manager as sfx
 
 # System Tray & UI Graphics
 import pystray
@@ -223,6 +224,9 @@ class SubnauticaPDAGUI:
         self.tray_icon = None
         self._init_tray()
 
+        # Play Alterra boot chime
+        sfx.play_sfx("pda_open")
+
         # Initial Boot Audio
         threading.Thread(target=speak, args=(dialogues.get_dialogue("boot"), "pda"), daemon=True).start()
 
@@ -254,6 +258,17 @@ class SubnauticaPDAGUI:
 
         divider = tk.Frame(self.root, height=2, bg=CYAN_DIM)
         divider.pack(fill="x", padx=15, pady=(8, 4))
+
+    def run_readiness_diagnostic(self):
+        """Runs the 7-day rolling biometric diagnostic and voice advisory."""
+        import readiness_engine
+        report = readiness_engine.calculate_biometric_readiness(scope_days=7)
+
+        for line in report["terminal_report"].split("\n"):
+            self.log_terminal(line)
+
+        # Trigger Alterra voice advisory asynchronously
+        threading.Thread(target=speak, args=(report["voice_line"], "pda"), daemon=True).start()
 
     def _build_vitals_panel(self):
         panel_container = tk.Frame(self.root, bg=BG_DARK, padx=20)
@@ -384,44 +399,150 @@ class SubnauticaPDAGUI:
         btn.pack(pady=15, fill="x", padx=25)
 
     def action_log_nap_dialog(self):
+        """
+        Interactive recovery modal supporting flexible duration inputs
+        (e.g., '20', '45m', '1.5', '1.5h', '1h 30m', '2 hrs').
+        """
+        import re
+
         win = tk.Toplevel(self.root)
-        win.title("LOG POWER NAP")
-        win.geometry("380x240")
+        win.title("LOG RECOVERY SLEEP")
+        win.geometry("400x260")
         win.configure(bg=PANEL_BG)
         win.resizable(False, False)
+        win.transient(self.root)
+        win.grab_set()
 
-        tk.Label(win, text="DAYTIME RECOVERY LOG", font=("Consolas", 11, "bold"), fg=CYAN_BRIGHT, bg=PANEL_BG).pack(pady=10)
+        def parse_duration_to_minutes(raw_str: str) -> int:
+            s = str(raw_str).strip().lower()
+            if not s:
+                raise ValueError("Duration cannot be empty.")
+
+            # 1. Composite formats: "1h 30m", "1hr 20min", "2 hours 15m"
+            h_m = re.match(r"^(\d+(?:\.\d+)?)\s*(?:h|hr|hrs|hours?)\s*(?:and\s*)?(\d+)?\s*(?:m|min|mins|minutes?)?$", s)
+            if h_m:
+                h = float(h_m.group(1))
+                m = float(h_m.group(2) or 0)
+                return int(round(h * 60 + m))
+
+            # 2. Minute strings: "45m", "90mins"
+            m_only = re.match(r"^(\d+)\s*(?:m|min|mins|minutes?)$", s)
+            if m_only:
+                return int(m_only.group(1))
+
+            # 3. Explicit hour strings: "1.5h", "2h"
+            if s.endswith("h"):
+                return int(round(float(s[:-1].strip()) * 60))
+
+            # 4. Numeric input: if <= 4.0 or contains a decimal point, interpret as hours
+            val = float(s)
+            if "." in s or val <= 4.0:
+                return int(round(val * 60))
+
+            # Otherwise interpret integer > 4 as minutes (e.g. 15, 20, 30, 45, 90)
+            return int(round(val))
+
+        tk.Label(
+            win, text="BIOLOGICAL RECOVERY LOG",
+            font=("Consolas", 11, "bold"), fg=CYAN_BRIGHT, bg=PANEL_BG
+        ).pack(pady=(12, 6))
 
         f_body = tk.Frame(win, bg=PANEL_BG, padx=20)
         f_body.pack(fill="x", pady=5)
 
-        tk.Label(f_body, text="Nap Duration (Minutes):", font=("Consolas", 9), fg=TEXT_LIGHT, bg=PANEL_BG).grid(row=0, column=0, sticky="w", pady=8)
-        ent_nap = tk.Entry(f_body, font=("Consolas", 9), bg="#02070b", fg=CYAN_BRIGHT, insertbackground=CYAN_BRIGHT, insertwidth=2, width=8)
+        tk.Label(
+            f_body, text="Duration (m, h, or 1h 20m):",
+            font=("Consolas", 9), fg=TEXT_LIGHT, bg=PANEL_BG
+        ).grid(row=0, column=0, sticky="w", pady=6)
+
+        ent_nap = tk.Entry(
+            f_body, font=("Consolas", 9), bg="#02070b",
+            fg=CYAN_BRIGHT, insertbackground=CYAN_BRIGHT, insertwidth=2, width=12
+        )
         ent_nap.insert(0, "30")
-        ent_nap.grid(row=0, column=1, sticky="w", pady=8, padx=5)
+        ent_nap.grid(row=0, column=1, sticky="w", pady=6, padx=6)
+
+        lbl_preview = tk.Label(
+            f_body, text="Parsed: 30 mins [POWER NAP]",
+            font=("Consolas", 8), fg="#00e5a3", bg=PANEL_BG
+        )
+        lbl_preview.grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 6))
+
+        tk.Label(
+            f_body, text="Recovery Notes:",
+            font=("Consolas", 9), fg=TEXT_LIGHT, bg=PANEL_BG
+        ).grid(row=2, column=0, sticky="w", pady=6)
+
+        ent_notes = tk.Entry(
+            f_body, font=("Consolas", 9), bg="#02070b",
+            fg=CYAN_BRIGHT, insertbackground=CYAN_BRIGHT, insertwidth=2, width=16
+        )
+        ent_notes.insert(0, "Daytime Recovery")
+        ent_notes.grid(row=2, column=1, sticky="w", pady=6, padx=6)
+
+        def update_preview(*args):
+            raw = ent_nap.get().strip()
+            try:
+                mins = parse_duration_to_minutes(raw)
+                hrs = mins / 60.0
+                if mins < 15:
+                    tag = "MICRO NAP (Negligible recovery)"
+                    color = "#888888"
+                elif mins <= 45:
+                    tag = "POWER NAP (Process C Reset)"
+                    color = "#00e5a3"
+                elif mins <= 90:
+                    tag = "FULL CYCLE (Ultradian Refresh)"
+                    color = "#00c8ff"
+                else:
+                    tag = f"EXTENDED SLEEP ({hrs:.1f}h Debt Offset)"
+                    color = "#ffb000"
+                lbl_preview.configure(text=f"Parsed: {mins}m ({hrs:.1f}h) [{tag}]", fg=color)
+            except Exception:
+                lbl_preview.configure(text="Format error (e.g. 20, 45m, 1.5h, 1h 20m)", fg="#ff3366")
+
+        ent_nap.bind("<KeyRelease>", update_preview)
 
         def save_nap():
             try:
-                mins = int(ent_nap.get().strip())
-                if mins <= 5 or mins > 360:
-                    raise ValueError("Nap duration must be between 5 and 360 minutes.")
+                mins = parse_duration_to_minutes(ent_nap.get().strip())
+                if mins < 5 or mins > 600:
+                    raise ValueError("Recovery duration must be between 5 minutes and 10 hours.")
 
-                db.log_nap(mins)
-                self.log_terminal(f"TELEMETRY LOGGED: Rest cycle ({mins}m) integrated.")
-                self.refresh_display()
+                notes = ent_notes.get().strip() or "Daytime Recovery"
+                success = database.log_nap(duration_minutes=mins, notes=notes)
 
-                if mins > 90:
-                    line = "Warning. Prolonged daytime sleep exceeds optimal limits. Circadian phase delay projected for nocturnal sleep."
+                if not success:
+                    raise RuntimeError("Failed to commit recovery cycle to database.")
+
+                hrs = mins / 60.0
+                if mins <= 45:
+                    term_msg = f"POWER NAP: {mins}m logged. Process C slump cleared."
+                    voice_msg = "Rest recovery cycle recorded. Homeostatic sleep pressure partially cleared."
+                elif mins <= 90:
+                    term_msg = f"ULTRADIAN CYCLE: {mins}m logged. Full sleep architecture refreshed."
+                    voice_msg = "Ultradian recovery completed. Rest parameters restored to nominal operating band."
                 else:
-                    line = "Rest recovery cycle recorded. Homeostatic sleep pressure partially cleared."
+                    term_msg = f"EXTENDED SLEEP: {hrs:.1f}h logged. Sleep debt neutralized; nocturnal sleep delay expected."
+                    voice_msg = "Warning. Prolonged daytime sleep recorded. Sleep debt neutralized, but circadian phase delay is projected."
 
-                threading.Thread(target=speak, args=(line, "pda"), daemon=True).start()
+                self.log_terminal(term_msg)
+                self.refresh_display()
                 win.destroy()
+                threading.Thread(target=speak, args=(voice_msg, "pda"), daemon=True).start()
+
             except ValueError as ve:
                 messagebox.showerror("Nap Input Error", str(ve))
+            except Exception as e:
+                messagebox.showerror("Database Error", str(e))
 
-        btn = tk.Button(win, text="COMMIT RECOVERY", font=("Consolas", 9, "bold"), bg="#0e2838", fg=CYAN_BRIGHT, bd=1, relief="ridge", command=save_nap, cursor="hand2")
-        btn.pack(pady=15, fill="x", padx=25)
+        btn = tk.Button(
+            win, text="COMMIT RECOVERY",
+            font=("Consolas", 9, "bold"), bg="#0e2838", fg=CYAN_BRIGHT,
+            activebackground=CYAN_DIM, activeforeground="#ffffff",
+            bd=1, relief="ridge", command=save_nap, cursor="hand2"
+        )
+        btn.pack(pady=12, fill="x", padx=25)
 
     def _build_action_deck(self):
         deck_frame = tk.Frame(self.root, bg=BG_DARK, padx=16, pady=3)
@@ -487,6 +608,14 @@ class SubnauticaPDAGUI:
             bd=1, relief="ridge", padx=4, pady=6, cursor="hand2", command=self.action_log_shower
         )
         btn_shower.pack(side="left", expand=True, fill="x", padx=2)
+        
+        btn_readiness = tk.Button(
+            row2, text="🧠 READINESS", font=("Consolas", 8, "bold"),
+            bg="#0a192f", fg="#00ffff", activebackground=CYAN_DIM, activeforeground="#ffffff",
+            bd=1, relief="ridge", padx=4, pady=6, cursor="hand2",
+            command=self.run_readiness_diagnostic
+        )
+        btn_readiness.pack(side="left", expand=True, fill="x", padx=2)
 
         # 3. Physical Exertion / Workout Load
         btn_ex = tk.Button(
@@ -511,6 +640,7 @@ class SubnauticaPDAGUI:
             bd=1, relief="ridge", padx=6, pady=6, cursor="hand2", command=self.action_view_archives
         )
         btn_archives.pack(side="left", expand=False, padx=2)
+
 
     def _build_telemetry_terminal(self):
         term_frame = tk.Frame(self.root, bg=BG_DARK, padx=20, pady=4)
@@ -647,6 +777,8 @@ class SubnauticaPDAGUI:
             self.lbl_system_mode.config(text="[ STANDBY - SLEEP CYCLE ]", fg=TEXT_MUTED)
         else:
             self.lbl_system_mode.config(text="[ TELEMETRY ACTIVE ]", fg=SUCCESS_GREEN)
+
+
     def poll_timers(self):
         self.refresh_display()
 
@@ -770,21 +902,36 @@ class SubnauticaPDAGUI:
             threading.Thread(target=speak, args=(shutdown_msg, "pda"), daemon=False).start()
             self.root.after(700, self.root.destroy)
 
-    def action_log_water(self):
-        amount = 250.0
+    def action_log_water(self, amount: float = 250.0):
+        """Logs standard 250ml water canister intake with acoustic and voice feedback."""
+        import sfx_manager as sfx
+
+        sfx.play_sfx("intake")
         database.log_water(amount)
-        totals = database.get_today_totals()
-        line = dialogues.get_water_logged_line(amount, totals['water_ml'], self.hud.target_water_ml)
-        self.log_terminal(f"Logged 250ml water. Today: {int(totals['water_ml'])}ml")
+        self.log_terminal(f"VITAL SIGNS: Hydration fluid (+{int(amount)}ml) assimilated.")
         self.refresh_display()
+
+        try:
+            line = dialogues.get_dialogue("water") if hasattr(dialogues, "get_dialogue") else "Vital signs nominal. Fluid intake recorded."
+        except Exception:
+            line = "Vital signs nominal. Fluid intake recorded."
+
         threading.Thread(target=speak, args=(line, "pda"), daemon=True).start()
 
-    def action_log_meal(self):
-        database.log_meal(tag="Standard Ration")
-        totals = database.get_today_totals()
-        line = dialogues.get_meal_logged_line("Sustenance ration", totals['meals_count'], self.hud.target_meals)
-        self.log_terminal(f"Logged sustenance. Count today: {totals['meals_count']}")
+    def action_log_meal(self, tag: str = "Standard Ration"):
+        """Logs nutritional ration intake with acoustic and voice feedback."""
+        import sfx_manager as sfx
+
+        sfx.play_sfx("click")
+        database.log_meal(tag)
+        self.log_terminal(f"VITAL SIGNS: Caloric ration [{tag}] integrated.")
         self.refresh_display()
+
+        try:
+            line = dialogues.get_dialogue("meal") if hasattr(dialogues, "get_dialogue") else "Caloric intake recorded. Metabolic balance stabilized."
+        except Exception:
+            line = "Caloric intake recorded. Metabolic balance stabilized."
+
         threading.Thread(target=speak, args=(line, "pda"), daemon=True).start()
 
     def action_log_brush(self):
@@ -808,36 +955,49 @@ class SubnauticaPDAGUI:
         threading.Thread(target=speak, args=(line, "pda"), daemon=True).start()
 
     def action_undo_intake(self):
-        """Purges the most recent metabolic or hygiene entry across SQLite/Supabase."""
+        """Purges the most recent telemetry entry across intake, hygiene, exercise, or naps."""
+        import sfx_manager as sfx
+
         deleted = database.undo_last_intake()
         if not deleted:
+            sfx.play_sfx("alert")
             self.log_terminal("UNDO NOTICE: No recent telemetry entries found to purge.")
-            messagebox.showinfo("Alterra PDA", "No recent intake or hygiene records found to rollback.")
+            messagebox.showinfo("Alterra PDA", "No recent records found to rollback.")
             return
+
+        # Trigger acoustic de-synth sweep
+        sfx.play_sfx("rollback")
 
         i_type = deleted.get("type", "unknown")
         amt = deleted.get("amount", 0)
         tag = deleted.get("tag", "")
 
-        # Format descriptive HUD terminal feedback
+        # Format descriptive HUD terminal feedback across all 5 operational vectors
         if i_type == "hydration":
-            msg = f"Purged {int(amt)}ml water"
+            msg = f"Purged {int(amt)}ml fluid"
         elif i_type == "hygiene":
             msg = f"Purged hygiene protocol: {tag}"
+        elif i_type == "exercise":
+            msg = f"Purged exertion log: {float(amt):.1f}h {tag}"
+        elif i_type == "nap":
+            msg = f"Purged recovery sleep: {int(amt)}m nap"
         else:
-            msg = f"Purged meal entry ({tag})"
+            msg = f"Purged nutritional ration: {tag}"
 
         self.log_terminal(f"TELEMETRY ROLLBACK: {msg}")
         self.refresh_display()
 
-        # Context-aware Alterra voice line with safe fallback
+        # Context-aware Alterra voice line with fallback
         try:
             if hasattr(dialogues, "get_rollback_line"):
                 line = dialogues.get_rollback_line(i_type, tag)
             else:
                 line = dialogues.get_dialogue("undo_intake")
         except Exception:
-            line = "Telemetry rollback confirmed. Record purged from operational memory."
+            if i_type in ("exercise", "nap"):
+                line = f"Physical telemetry rollback confirmed. {i_type.capitalize()} record purged from active memory."
+            else:
+                line = "Telemetry rollback confirmed. Record purged from operational memory."
 
         threading.Thread(target=speak, args=(line, "pda"), daemon=True).start()
 
@@ -906,16 +1066,17 @@ class SubnauticaPDAGUI:
         def save_and_close():
             try:
                 d_str = entry_date.get().strip()
-                wake_date = datetime.strptime(d_str, fmt)
+                wake_date = None
+
                 for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%Y/%m/%d"):
                     try:
                         wake_date = datetime.strptime(d_str, fmt)
                         break
                     except ValueError:
-                        pass
-                
+                        continue
+
                 if not wake_date:
-                    raise ValueError("Date format must be DD/MM/YYYY")
+                    raise ValueError(f"Unrecognised date format '{d_str}'. Use DD/MM/YYYY or YYYY-MM-DD.")
 
                 s_hr, s_mn = parse_time_component(entry_s_time.get(), combo_s_ampm.get())
                 w_hr, w_mn = parse_time_component(entry_w_time.get(), combo_w_ampm.get())
@@ -923,6 +1084,7 @@ class SubnauticaPDAGUI:
                 t_wake = wake_date.replace(hour=w_hr, minute=w_mn, second=0)
                 t_sleep = wake_date.replace(hour=s_hr, minute=s_mn, second=0)
 
+                # Midnight crossover adjustment: if wake <= sleep, sleep began on the previous calendar day
                 if t_wake <= t_sleep:
                     t_sleep -= timedelta(days=1)
 
@@ -940,17 +1102,20 @@ class SubnauticaPDAGUI:
                 report = sleep_analytics.analyze_sleep_trajectory()
 
                 self.log_terminal(f"Logged Sleep: {dur:.1f}h (Disruptions: {dis_val})")
-                for r_line in report["terminal_report"].split("\n"):
-                    self.log_terminal(r_line)
+                for r_line in report.get("terminal_report", "").split("\n"):
+                    if r_line.strip():
+                        self.log_terminal(r_line)
 
                 self.refresh_display()
-                threading.Thread(target=speak, args=(report["voice_line"], "pda"), daemon=True).start()
+                if report.get("voice_line"):
+                    threading.Thread(target=speak, args=(report["voice_line"], "pda"), daemon=True).start()
 
             except ValueError as ve:
                 messagebox.showerror("Time Error", f"Invalid time or date input: {ve}")
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to record sleep cycle: {e}")
 
+                
         btn_save = tk.Button(
             win, text="CONFIRM RECOVERY", font=("Consolas", 10, "bold"),
             bg="#0e2838", fg=CYAN_BRIGHT, activebackground=CYAN_DIM,

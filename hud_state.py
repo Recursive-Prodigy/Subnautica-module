@@ -96,6 +96,18 @@ class HUDState:
         else:
             return cur_min >= start_min or cur_min < end_min
 
+    # -----------------------------------------------------------------------
+    # DYNAMIC EXERTION & METABOLIC COUPLING
+    # -----------------------------------------------------------------------
+    def get_dynamic_hydration_target(self) -> int:
+        """Dynamically scales water quota (+500ml per hour of logged exercise today)."""
+        base_target = self.target_water_ml
+        try:
+            workout_hours = db.get_today_exercise_hours()
+            return int(base_target + (workout_hours * 500))
+        except Exception:
+            return base_target
+
     def get_dynamic_hydration_interval(self) -> int:
         """Returns compressed interval (~50m) if exercise logged in last 3 hours, else default 75m."""
         now = time_manager.now()
@@ -104,7 +116,7 @@ class HUDState:
             recent_ex = db.get_all_exercise_history(days=1, order="desc")
             if recent_ex:
                 latest_ex_dt = _parse_db_timestamp(recent_ex[0].get("logged_at"))
-                if latest_ex_dt and (now - latest_ex_dt).total_seconds() <= 10800:
+                if latest_ex_dt and (now - latest_ex_dt).total_seconds() <= 10800:  # 3 hours
                     return max(35, int(self.hydration_interval_min * 0.65))
         except Exception:
             pass
@@ -137,17 +149,8 @@ class HUDState:
 
         elapsed_min = max(0, int((now - last_dt).total_seconds() / 60.0))
 
-        # Dynamic Exertion Coupling:
-        # If exercise logged within the last 3 hours, compress interval from 75m to 50m
-        effective_interval = self.hydration_interval_min
-        try:
-            recent_ex = db.get_all_exercise_history(days=1, order="desc")
-            if recent_ex:
-                latest_ex_dt = _parse_db_timestamp(recent_ex[0].get("logged_at"))
-                if latest_ex_dt and (now - latest_ex_dt).total_seconds() <= 10800:  # 3 hours
-                    effective_interval = max(35, int(self.hydration_interval_min * 0.65))
-        except Exception:
-            pass
+        # Dynamic Exertion Coupling: uses dynamically compressed interval if active
+        effective_interval = self.get_dynamic_hydration_interval()
 
         status = (
             "OVERDUE"
@@ -285,12 +288,19 @@ class HUDState:
             naps = db.get_today_naps()
             total_nap_min = sum(int(n.get("duration_minutes", 0)) for n in naps)
             if 0 < total_nap_min <= 45:
-                nap_mod = min(1.2, total_nap_min * 0.025)
+                # Power nap: linear small boost
+                nap_mod = min(1.0, total_nap_min * 0.022)
             elif 45 < total_nap_min <= 90:
+                # Full ultradian cycle: solid recovery
                 nap_mod = 1.2
             elif total_nap_min > 90:
-                nap_mod = 1.4
-                circadian_mod -= min(1.5, (total_nap_min - 90) / 60.0 * 0.5)
+                # Extended daytime sleep (e.g. 2-3 hours)
+                # Adds major capacity (+1.5h to +2.5h awake budget)
+                nap_hours = total_nap_min / 60.0
+                nap_mod = min(2.5, 1.2 + (nap_hours - 1.5) * 0.6)
+                
+                # Circadian delay: each hour over 90 mins pushes evening melatonin back
+                circadian_mod -= min(2.0, (total_nap_min - 90) / 60.0 * 0.4)
         except Exception:
             pass
 
@@ -347,15 +357,38 @@ class HUDState:
 
         # --- PROCESS C: Circadian Afternoon Trough (7.0 - 9.0 hours post-wake) ---
         is_circadian_dip = 7.0 <= hours_awake <= 9.0
+        nap_recovery_active = False
+
         if is_circadian_dip:
-            dip_penalty = 0.08 * (1.0 - abs(hours_awake - 8.0))
-            alertness_frac = max(0.0, base_alertness - dip_penalty)
+            # Check if nap or sleep occurred today
+            try:
+                today_naps = db.get_today_naps()
+                total_nap_min = sum(int(n.get("duration_minutes", 0)) for n in today_naps)
+                if total_nap_min >= 15:
+                    nap_recovery_active = True
+            except Exception:
+                nap_recovery_active = False
+
+            if nap_recovery_active:
+                alertness_frac = base_alertness
+                s_sub = "POST-NAP NOMINAL" if total_nap_min <= 90 else "EXT-SLEEP RESET"
+                s_status = "OPTIMAL"
+            else:
+                dip_penalty = 0.08 * (1.0 - abs(hours_awake - 8.0))
+                alertness_frac = max(0.0, base_alertness - dip_penalty)
+                s_sub = "CIRCADIAN DIP"
+                s_status = "DUE"
         else:
             alertness_frac = base_alertness
 
+        # Status text & badges
         if is_circadian_dip:
-            s_sub = "CIRCADIAN DIP"
-            s_status = "DUE"
+            if nap_recovery_active:
+                s_sub = "POST-NAP NOMINAL"
+                s_status = "OPTIMAL"
+            else:
+                s_sub = "CIRCADIAN DIP"
+                s_status = "DUE"
         elif alertness_frac <= 0.05 or remaining_hours <= 0:
             s_status = "OVERDUE"
             s_sub = f"+{abs(total_budget - hours_awake):.1f}h over"

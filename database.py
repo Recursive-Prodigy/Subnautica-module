@@ -1,14 +1,18 @@
 import json
 import os
 import sqlite3
-from datetime import datetime, time, timezone, timedelta
-from time_sync import time_manager
 import threading
+import time
+from datetime import datetime, timedelta, timezone
+from time_sync import time_manager
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "pda_config.json")
 LOCAL_DB_PATH = os.path.join(os.path.dirname(__file__), "pda_local.db")
 
 _WARNED_MISSING_TABLES = set()
+_schemas_verified = False
+_db_initialized = False
+
 
 def _check_supabase_error(e, table_name: str):
     """Silences repeat PGRST205 schema errors so terminal stays clean while offline."""
@@ -19,6 +23,7 @@ def _check_supabase_error(e, table_name: str):
             print(f"[SUPABASE NOTICE] Table '{table_name}' not yet deployed to cloud. Falling back to local SQLite.")
     else:
         print(f"[SUPABASE ERROR] {table_name}: {e}")
+
 
 # ---------------------------------------------------------------------------
 # 1. CONFIGURATION & CLOUD CLIENT INSPECTION
@@ -31,7 +36,7 @@ if os.path.exists(CONFIG_PATH):
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
             _cfg = json.load(f)
         STORAGE_MODE = _cfg.get("storage_mode", "local")
-        
+
         if STORAGE_MODE == "supabase":
             from supabase import create_client
             url = _cfg.get("supabase_url")
@@ -59,58 +64,20 @@ def _get_sqlite_conn():
     return conn
 
 
-def _init_local_db():
-    conn = _get_sqlite_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS intake_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            type TEXT NOT NULL,
-            amount REAL NOT NULL,
-            tag TEXT,
-            logged_at TEXT NOT NULL
-        )
-    """)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS hygiene_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            tag TEXT NOT NULL,
-            logged_at TEXT NOT NULL
-        )
-    """)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS sleep_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            sleep_time TEXT NOT NULL,
-            wake_time TEXT NOT NULL,
-            duration_hours REAL NOT NULL,
-            interruptions INTEGER DEFAULT 0,
-            quality_notes TEXT,
-            logged_at TEXT NOT NULL
-        )
-    """)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS exercise_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            duration_hours REAL NOT NULL,
-            intensity TEXT DEFAULT 'moderate',
-            notes TEXT DEFAULT '',
-            logged_at TEXT NOT NULL
-        )
-    """)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS nap_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            duration_minutes INTEGER NOT NULL,
-            notes TEXT DEFAULT '',
-            logged_at TEXT NOT NULL
-        )
-    """)
-    conn.commit()
-    conn.close()
+def verify_remote_schemas():
+    """Triggers the automated HTTPS RPC schema sync ONCE on startup."""
+    global _schemas_verified
+    if _schemas_verified:
+        return
 
-# Always bootstrap local tables as a resilient offline backup
-_init_local_db()
+    if STORAGE_MODE == "supabase" and supabase:
+        try:
+            res = supabase.rpc("sync_pda_schemas", {}).execute()
+            print("[ALTERRA REMOTE] Remote schema verification:", res.data)
+            _schemas_verified = True
+        except Exception as e:
+            print(f"[ALTERRA REMOTE] Schema sync bypass: {e}")
+
 
 def prune_hot_cloud_cache(retention_days: int = 30):
     """
@@ -138,61 +105,215 @@ def prune_hot_cloud_cache(retention_days: int = 30):
                     cur.execute("SELECT id FROM intake_logs WHERE logged_at = ?", (ts,))
                     if not cur.fetchone():
                         cur.execute(
-                            "INSERT INTO intake_logs (type, amount, tag, logged_at) VALUES (?, ?, ?, ?)",
+                            "INSERT INTO intake_logs (type, amount, tag, logged_at, synced) VALUES (?, ?, ?, ?, 1)",
                             (r.get("type"), r.get("amount"), r.get("tag"), ts)
                         )
                 elif tbl == "sleep_logs":
                     cur.execute("SELECT id FROM sleep_logs WHERE logged_at = ?", (ts,))
                     if not cur.fetchone():
                         cur.execute(
-                            "INSERT INTO sleep_logs (sleep_time, wake_time, duration_hours, interruptions, quality_notes, logged_at) VALUES (?, ?, ?, ?, ?, ?)",
+                            "INSERT INTO sleep_logs (sleep_time, wake_time, duration_hours, interruptions, quality_notes, logged_at, synced) VALUES (?, ?, ?, ?, ?, ?, 1)",
                             (r.get("sleep_time"), r.get("wake_time"), r.get("duration_hours"), r.get("interruptions"), r.get("quality_notes"), ts)
                         )
                 elif tbl == "exercise_logs":
                     cur.execute("SELECT id FROM exercise_logs WHERE logged_at = ?", (ts,))
                     if not cur.fetchone():
                         cur.execute(
-                            "INSERT INTO exercise_logs (exercise_type, duration_hours, intensity, notes, logged_at) VALUES (?, ?, ?, ?, ?)",
+                            "INSERT INTO exercise_logs (exercise_type, duration_hours, intensity, notes, logged_at, synced) VALUES (?, ?, ?, ?, ?, 1)",
                             (r.get("exercise_type"), r.get("duration_hours"), r.get("intensity"), r.get("notes"), ts)
                         )
                 elif tbl == "nap_logs":
                     cur.execute("SELECT id FROM nap_logs WHERE logged_at = ?", (ts,))
                     if not cur.fetchone():
                         cur.execute(
-                            "INSERT INTO nap_logs (duration_minutes, notes, logged_at) VALUES (?, ?, ?)",
+                            "INSERT INTO nap_logs (duration_minutes, notes, logged_at, synced) VALUES (?, ?, ?, 1)",
                             (r.get("duration_minutes"), r.get("notes"), ts)
                         )
                 elif tbl == "hygiene_logs":
                     cur.execute("SELECT id FROM hygiene_logs WHERE logged_at = ?", (ts,))
                     if not cur.fetchone():
                         cur.execute(
-                            "INSERT INTO hygiene_logs (tag, logged_at) VALUES (?, ?)",
+                            "INSERT INTO hygiene_logs (tag, logged_at, synced) VALUES (?, ?, 1)",
                             (r.get("tag"), ts)
                         )
             conn.commit()
             conn.close()
 
-            # Safely prune from cloud only after SQLite vault confirmation
             supabase.table(tbl).delete().lt("logged_at", cutoff_iso).execute()
             print(f"[ARCHIVER] Pruned {len(old_records)} cold entries from cloud table '{tbl}'.")
         except Exception as e:
             print(f"[ARCHIVER] Cloud prune notice on '{tbl}': {e}")
 
 
-def verify_remote_schemas():
-    """Triggers the automated HTTPS RPC schema sync on startup."""
-    if STORAGE_MODE == "supabase" and supabase:
-        try:
-            res = supabase.rpc("sync_pda_schemas", {}).execute()
-            print("[ALTERRA REMOTE] Remote schema verification:", res.data)
-        except Exception as e:
-            print(f"[ALTERRA REMOTE] Schema sync bypass: {e}")
+def flush_offline_buffer() -> int:
+    """
+    Scans local SQLite tables for un-synced entries (synced = 0)
+    and flushes them to Supabase in chronological order.
+    """
+    if STORAGE_MODE != "supabase" or not supabase:
+        return 0
 
-# Run remote schema verification
+    total_flushed = 0
+    tables_config = {
+        "intake_logs": {
+            "cols": ["id", "type", "amount", "tag", "logged_at"],
+            "payload": lambda r: {"type": r[1], "amount": r[2], "tag": r[3], "logged_at": r[4]}
+        },
+        "hygiene_logs": {
+            "cols": ["id", "tag", "logged_at"],
+            "payload": lambda r: {"tag": r[1], "logged_at": r[2]}
+        },
+        "sleep_logs": {
+            "cols": ["id", "sleep_time", "wake_time", "duration_hours", "interruptions", "quality_notes", "logged_at"],
+            "payload": lambda r: {
+                "sleep_time": r[1], "wake_time": r[2], "duration_hours": r[3],
+                "interruptions": r[4], "quality_notes": r[5], "logged_at": r[6]
+            }
+        },
+        "exercise_logs": {
+            "cols": ["id", "exercise_type", "duration_hours", "intensity", "notes", "logged_at"],
+            "payload": lambda r: {
+                "exercise_type": r[1], "duration_hours": r[2], "intensity": r[3],
+                "notes": r[4], "logged_at": r[5]
+            }
+        },
+        "nap_logs": {
+            "cols": ["id", "duration_minutes", "notes", "logged_at"],
+            "payload": lambda r: {"duration_minutes": r[1], "notes": r[2], "logged_at": r[3]}
+        }
+    }
+
+    conn = _get_sqlite_conn()
+    cur = conn.cursor()
+
+    for tbl, cfg in tables_config.items():
+        col_str = ", ".join(cfg["cols"])
+        try:
+            cur.execute(f"SELECT {col_str} FROM {tbl} WHERE synced = 0 ORDER BY id ASC")
+            rows = cur.fetchall()
+        except sqlite3.OperationalError:
+            continue
+
+        if not rows:
+            continue
+
+        for r in rows:
+            record_id = r[0]
+            body = cfg["payload"](r)
+            try:
+                supabase.table(tbl).insert(body).execute()
+                up_conn = _get_sqlite_conn()
+                up_conn.execute(f"UPDATE {tbl} SET synced = 1 WHERE id = ?", (record_id,))
+                up_conn.commit()
+                up_conn.close()
+                total_flushed += 1
+            except Exception as e:
+                _check_supabase_error(e, tbl)
+                break  # Stop processing this table to preserve transaction sequence
+
+    conn.close()
+
+    if total_flushed > 0:
+        print(f"[BUFFER FLUSHER] Successfully pushed {total_flushed} offline transactions to Supabase.")
+
+    return total_flushed
+
+
+def _background_buffer_flusher(interval_sec: int = 25):
+    """Daemon thread loop that flushes pending local records every interval."""
+    while True:
+        try:
+            time.sleep(interval_sec)
+            flush_offline_buffer()
+        except Exception:
+            pass
+
+
+def _init_local_db():
+    """Ensures local tables, migrations, and background workers run once per lifecycle."""
+    global _db_initialized
+    if _db_initialized:
+        return
+
+    conn = _get_sqlite_conn()
+    cur = conn.cursor()
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS intake_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            type TEXT NOT NULL,
+            amount REAL NOT NULL,
+            tag TEXT,
+            logged_at TEXT NOT NULL,
+            synced INTEGER DEFAULT 0
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS hygiene_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tag TEXT NOT NULL,
+            logged_at TEXT NOT NULL,
+            synced INTEGER DEFAULT 0
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS sleep_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sleep_time TEXT NOT NULL,
+            wake_time TEXT NOT NULL,
+            duration_hours REAL NOT NULL,
+            interruptions INTEGER DEFAULT 0,
+            quality_notes TEXT,
+            logged_at TEXT NOT NULL,
+            synced INTEGER DEFAULT 0
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS exercise_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            exercise_type TEXT NOT NULL,
+            duration_hours REAL NOT NULL,
+            intensity TEXT NOT NULL,
+            notes TEXT,
+            logged_at TEXT NOT NULL,
+            synced INTEGER DEFAULT 0
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS nap_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            duration_minutes INTEGER NOT NULL,
+            notes TEXT,
+            logged_at TEXT NOT NULL,
+            synced INTEGER DEFAULT 0
+        )
+    """)
+
+    # Safe migration: add 'synced' to existing tables if missing
+    for tbl in ("intake_logs", "hygiene_logs", "sleep_logs", "exercise_logs", "nap_logs"):
+        try:
+            cur.execute(f"ALTER TABLE {tbl} ADD COLUMN synced INTEGER DEFAULT 1;")
+        except sqlite3.OperationalError:
+            pass
+
+    conn.commit()
+    conn.close()
+
+    _db_initialized = True
+
+    # 1. Run remote verification once
     verify_remote_schemas()
 
-    # Launch background cold-vault archiver and cloud buffer prune
+    # 2. Launch rolling 30-day cold vault archiver
     threading.Thread(target=prune_hot_cloud_cache, args=(30,), daemon=True).start()
+
+    # 3. Launch offline buffer auto-flusher daemon
+    threading.Thread(target=_background_buffer_flusher, args=(25,), daemon=True).start()
+
+
+# Bootstraps local tables and background threads
+_init_local_db()
+
 
 # ---------------------------------------------------------------------------
 # 3. TIMESTAMP CONVERTERS & HELPERS
@@ -231,6 +352,17 @@ def _parse_timestamp(val) -> float:
 # ---------------------------------------------------------------------------
 def log_intake(intake_type: str, amount: float = 1.0, tag: str = ""):
     now_utc = _get_now_utc_iso()
+
+    conn = _get_sqlite_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO intake_logs (type, amount, tag, logged_at, synced) VALUES (?, ?, ?, ?, 0)",
+        (intake_type, amount, tag, now_utc)
+    )
+    row_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+
     if STORAGE_MODE == "supabase" and supabase:
         try:
             supabase.table("intake_logs").insert({
@@ -239,18 +371,13 @@ def log_intake(intake_type: str, amount: float = 1.0, tag: str = ""):
                 "tag": tag,
                 "logged_at": now_utc
             }).execute()
-            return
-        except Exception as e:
-            print(f"[SUPABASE OFFLINE] Falling back to local storage: {e}")
 
-    conn = _get_sqlite_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO intake_logs (type, amount, tag, logged_at) VALUES (?, ?, ?, ?)",
-        (intake_type, amount, tag, now_utc)
-    )
-    conn.commit()
-    conn.close()
+            up_conn = _get_sqlite_conn()
+            up_conn.execute("UPDATE intake_logs SET synced = 1 WHERE id = ?", (row_id,))
+            up_conn.commit()
+            up_conn.close()
+        except Exception as e:
+            print(f"[BUFFER QUEUED] Intake stored locally (Offline ID {row_id}): {e}")
 
 
 def log_water(amount_ml: float = 250.0):
@@ -266,26 +393,32 @@ def log_meal(tag: str = "Standard Ration"):
 # ---------------------------------------------------------------------------
 def log_hygiene(tag: str = "brushing"):
     now_utc = _get_now_utc_iso()
+
+    conn = _get_sqlite_conn()
+    cur = conn.cursor()
+    cur.execute("INSERT INTO hygiene_logs (tag, logged_at, synced) VALUES (?, ?, 0)", (tag, now_utc))
+    row_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+
     if STORAGE_MODE == "supabase" and supabase:
         try:
             supabase.table("hygiene_logs").insert({
                 "tag": tag,
                 "logged_at": now_utc
             }).execute()
-            return
-        except Exception as e:
-            print(f"[SUPABASE OFFLINE] Falling back to local storage: {e}")
 
-    conn = _get_sqlite_conn()
-    cur = conn.cursor()
-    cur.execute("INSERT INTO hygiene_logs (tag, logged_at) VALUES (?, ?)", (tag, now_utc))
-    conn.commit()
-    conn.close()
+            up_conn = _get_sqlite_conn()
+            up_conn.execute("UPDATE hygiene_logs SET synced = 1 WHERE id = ?", (row_id,))
+            up_conn.commit()
+            up_conn.close()
+        except Exception as e:
+            print(f"[BUFFER QUEUED] Hygiene stored locally (Offline ID {row_id}): {e}")
 
 
 def get_hygiene_today_count(tag: str = "brushing") -> int:
     local_now = time_manager.now()
-    start_of_day_local = datetime.combine(local_now.date(), time.min, tzinfo=local_now.tzinfo)
+    start_of_day_local = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
     start_of_day_utc = start_of_day_local.astimezone(timezone.utc).isoformat()
 
     if STORAGE_MODE == "supabase" and supabase:
@@ -385,6 +518,21 @@ def get_all_hygiene_history(limit: int = None, days: int = None, order: str = "d
 def log_exercise(duration_hours: float, intensity: str = "moderate", notes: str = "") -> bool:
     """Logs physical exertion (capped between 0.1h and 16.0h)."""
     now_utc = _get_now_utc_iso()
+
+    try:
+        conn = _get_sqlite_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO exercise_logs (duration_hours, intensity, notes, logged_at, synced) VALUES (?, ?, ?, ?, 0)",
+            (duration_hours, intensity, notes, now_utc)
+        )
+        row_id = cur.lastrowid
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[LOCAL DB ERROR] Failed to log exercise: {e}")
+        return False
+
     if STORAGE_MODE == "supabase" and supabase:
         try:
             supabase.table("exercise_logs").insert({
@@ -393,28 +541,20 @@ def log_exercise(duration_hours: float, intensity: str = "moderate", notes: str 
                 "notes": notes,
                 "logged_at": now_utc
             }).execute()
-            return True
-        except Exception as e:
-            print(f"[SUPABASE OFFLINE] Falling back to local storage: {e}")
 
-    try:
-        conn = _get_sqlite_conn()
-        cur = conn.cursor()
-        cur.execute(
-            "INSERT INTO exercise_logs (duration_hours, intensity, notes, logged_at) VALUES (?, ?, ?, ?)",
-            (duration_hours, intensity, notes, now_utc)
-        )
-        conn.commit()
-        conn.close()
-        return True
-    except Exception as e:
-        print(f"[DB ERROR] Failed to log exercise: {e}")
-        return False
+            up_conn = _get_sqlite_conn()
+            up_conn.execute("UPDATE exercise_logs SET synced = 1 WHERE id = ?", (row_id,))
+            up_conn.commit()
+            up_conn.close()
+        except Exception as e:
+            print(f"[BUFFER QUEUED] Exercise stored locally (Offline ID {row_id}): {e}")
+
+    return True
 
 
 def get_today_exercise_hours() -> float:
     local_now = time_manager.now()
-    start_of_day_local = datetime.combine(local_now.date(), time.min, tzinfo=local_now.tzinfo)
+    start_of_day_local = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
     start_of_day_utc = start_of_day_local.astimezone(timezone.utc).isoformat()
 
     if STORAGE_MODE == "supabase" and supabase:
@@ -430,7 +570,6 @@ def get_today_exercise_hours() -> float:
         except Exception as e:
             _check_supabase_error(e, "exercise_logs")
 
-    # Local SQLite fallback
     try:
         conn = _get_sqlite_conn()
         cur = conn.cursor()
@@ -440,7 +579,7 @@ def get_today_exercise_hours() -> float:
         )
         row = cur.fetchone()
         conn.close()
-        return float(row[0] or 0.0) if row and row[0] is not None else 0.0
+        return float(row[0]) if (row and row[0] is not None) else 0.0
     except Exception:
         return 0.0
 
@@ -448,6 +587,21 @@ def get_today_exercise_hours() -> float:
 def log_nap(duration_minutes: int, notes: str = "") -> bool:
     """Logs daytime power nap or recovery cycle."""
     now_utc = _get_now_utc_iso()
+
+    try:
+        conn = _get_sqlite_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO nap_logs (duration_minutes, notes, logged_at, synced) VALUES (?, ?, ?, 0)",
+            (duration_minutes, notes, now_utc)
+        )
+        row_id = cur.lastrowid
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[LOCAL DB ERROR] Failed to log nap: {e}")
+        return False
+
     if STORAGE_MODE == "supabase" and supabase:
         try:
             supabase.table("nap_logs").insert({
@@ -455,28 +609,20 @@ def log_nap(duration_minutes: int, notes: str = "") -> bool:
                 "notes": notes,
                 "logged_at": now_utc
             }).execute()
-            return True
-        except Exception as e:
-            print(f"[SUPABASE OFFLINE] Falling back to local storage: {e}")
 
-    try:
-        conn = _get_sqlite_conn()
-        cur = conn.cursor()
-        cur.execute(
-            "INSERT INTO nap_logs (duration_minutes, notes, logged_at) VALUES (?, ?, ?)",
-            (duration_minutes, notes, now_utc)
-        )
-        conn.commit()
-        conn.close()
-        return True
-    except Exception as e:
-        print(f"[DB ERROR] Failed to log nap: {e}")
-        return False
+            up_conn = _get_sqlite_conn()
+            up_conn.execute("UPDATE nap_logs SET synced = 1 WHERE id = ?", (row_id,))
+            up_conn.commit()
+            up_conn.close()
+        except Exception as e:
+            print(f"[BUFFER QUEUED] Nap stored locally (Offline ID {row_id}): {e}")
+
+    return True
 
 
 def get_today_naps() -> list:
     local_now = time_manager.now()
-    start_of_day_local = datetime.combine(local_now.date(), time.min, tzinfo=local_now.tzinfo)
+    start_of_day_local = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
     start_of_day_utc = start_of_day_local.astimezone(timezone.utc).isoformat()
 
     if STORAGE_MODE == "supabase" and supabase:
@@ -492,7 +638,6 @@ def get_today_naps() -> list:
         except Exception as e:
             _check_supabase_error(e, "nap_logs")
 
-    # Local SQLite fallback
     try:
         conn = _get_sqlite_conn()
         cur = conn.cursor()
@@ -517,7 +662,6 @@ def undo_last_intake() -> dict:
     """Purges whichever event occurred most recently across intake, hygiene, exercise, or naps."""
     candidates = []
 
-    # Supabase route
     if STORAGE_MODE == "supabase" and supabase:
         try:
             res_i = supabase.table("intake_logs").select("id, type, amount, tag, logged_at").order("logged_at", desc=True).limit(1).execute()
@@ -561,7 +705,6 @@ def undo_last_intake() -> dict:
         except Exception as e:
             print(f"[SUPABASE ROLLBACK ERROR] {e}")
 
-    # Local SQLite fallback
     conn = _get_sqlite_conn()
     cur = conn.cursor()
 
@@ -615,7 +758,7 @@ def undo_last_intake() -> dict:
 # ---------------------------------------------------------------------------
 def get_today_totals() -> dict:
     local_now = time_manager.now()
-    start_of_day_local = datetime.combine(local_now.date(), time.min, tzinfo=local_now.tzinfo)
+    start_of_day_local = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
     start_of_day_utc = start_of_day_local.astimezone(timezone.utc).isoformat()
 
     if STORAGE_MODE == "supabase" and supabase:
@@ -695,7 +838,6 @@ def _parse_input_datetime(ts_str: str) -> datetime:
         except ValueError:
             continue
 
-    # Attempt ISO format fallback
     try:
         iso_clean = clean_str.replace("Z", "+00:00")
         return datetime.fromisoformat(iso_clean)
@@ -707,8 +849,7 @@ def _parse_input_datetime(ts_str: str) -> datetime:
 
 def log_sleep(sleep_time: str, wake_time: str, interruptions: int = 0, notes: str = "") -> float:
     """
-    Logs a completed sleep cycle into Supabase and local SQLite.
-    Safely parses both 24h (ISO/standard) and 12h AM/PM strings.
+    Logs a completed sleep cycle into both local SQLite and Supabase simultaneously.
     """
     def parse_dt(raw_val: str) -> datetime:
         clean = str(raw_val).strip()
@@ -727,7 +868,6 @@ def log_sleep(sleep_time: str, wake_time: str, interruptions: int = 0, notes: st
             except ValueError:
                 continue
 
-        # ISO fallback
         try:
             return datetime.fromisoformat(clean.replace("Z", "+00:00"))
         except Exception:
@@ -741,7 +881,6 @@ def log_sleep(sleep_time: str, wake_time: str, interruptions: int = 0, notes: st
     duration = max(0.0, (t_wake_naive - t_sleep_naive).total_seconds() / 3600.0)
     now_utc = _get_now_utc_iso()
 
-    # Localize wall-clock inputs into target timezone, then normalize to UTC ISO
     user_tz = time_manager.target_tz
     if t_sleep_naive.tzinfo is None:
         t_sleep_utc = t_sleep_naive.replace(tzinfo=user_tz).astimezone(timezone.utc).isoformat()
@@ -753,6 +892,22 @@ def log_sleep(sleep_time: str, wake_time: str, interruptions: int = 0, notes: st
     else:
         t_wake_utc = t_wake_naive.astimezone(timezone.utc).isoformat()
 
+    # 1. Primary write: Local SQLite (Instant)
+    try:
+        conn = _get_sqlite_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO sleep_logs (sleep_time, wake_time, duration_hours, interruptions, quality_notes, logged_at, synced)
+            VALUES (?, ?, ?, ?, ?, ?, 0)
+        """, (t_sleep_utc, t_wake_utc, round(duration, 2), interruptions, notes, now_utc))
+        row_id = cur.lastrowid
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[LOCAL DB ERROR] Failed to record sleep locally: {e}")
+        return duration
+
+    # 2. Cloud mirror: Supabase
     if STORAGE_MODE == "supabase" and supabase:
         try:
             supabase.table("sleep_logs").insert({
@@ -763,18 +918,14 @@ def log_sleep(sleep_time: str, wake_time: str, interruptions: int = 0, notes: st
                 "duration_hours": round(duration, 2),
                 "logged_at": now_utc
             }).execute()
-            return duration
-        except Exception as e:
-            print(f"[SUPABASE OFFLINE] Diverting sleep log to local SQLite: {e}")
 
-    conn = _get_sqlite_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO sleep_logs (sleep_time, wake_time, duration_hours, interruptions, quality_notes, logged_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (t_sleep_utc, t_wake_utc, round(duration, 2), interruptions, notes, now_utc))
-    conn.commit()
-    conn.close()
+            up_conn = _get_sqlite_conn()
+            up_conn.execute("UPDATE sleep_logs SET synced = 1 WHERE id = ?", (row_id,))
+            up_conn.commit()
+            up_conn.close()
+        except Exception as e:
+            print(f"[BUFFER QUEUED] Sleep stored locally (Offline ID {row_id}): {e}")
+
     return duration
 
 
@@ -817,6 +968,7 @@ def get_all_intake_history(limit: int = None, days: int = None, order: str = "de
     rows = cur.fetchall()
     conn.close()
     return [{"id": r[0], "type": r[1], "amount": r[2], "tag": r[3], "logged_at": r[4]} for r in rows]
+
 
 def get_all_exercise_history(limit: int = None, days: int = None, order: str = "desc") -> list:
     descending = (order.lower() == "desc")
@@ -902,7 +1054,7 @@ def get_all_nap_history(limit: int = None, days: int = None, order: str = "desc"
         ]
     except Exception:
         return []
-    
+
 
 def get_all_sleep_history(limit: int = None, days: int = None, order: str = "desc") -> list:
     descending = (order.lower() == "desc")
