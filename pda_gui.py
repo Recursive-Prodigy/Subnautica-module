@@ -59,7 +59,7 @@ def format_date_dmy(date_val, include_time: bool = True) -> str:
     if not date_val:
         return "--"
     clean_str = str(date_val).replace("T", " ").strip()
-    
+
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M:%S", "%Y/%m/%d %H:%M"):
         try:
             dt = datetime.strptime(clean_str[:19], fmt)
@@ -94,7 +94,7 @@ class CircularHUDGauge(tk.Canvas):
         self.ring_width = ring_width
         self.title = title
         self.base_color = base_color
-        
+
         self.cx = size / 2
         self.cy = size / 2
         self.radius = (size / 2) - ring_width - 4
@@ -225,7 +225,7 @@ class SubnauticaPDAGUI:
         self._init_tray()
 
         # Play Alterra boot chime
-        sfx.play_sfx("pda_open")
+        sfx.play_sfx("bootup")
 
         # Initial Boot Audio
         threading.Thread(target=speak, args=(dialogues.get_dialogue("boot"), "pda"), daemon=True).start()
@@ -236,7 +236,7 @@ class SubnauticaPDAGUI:
     def _build_header(self):
         header_frame = tk.Frame(self.root, bg=BG_DARK, pady=8, padx=20)
         header_frame.pack(fill="x")
-        
+
         title_box = tk.Frame(header_frame, bg=BG_DARK)
         title_box.pack(side="left")
 
@@ -398,6 +398,24 @@ class SubnauticaPDAGUI:
         btn = tk.Button(win, text="RECORD PHYSICAL LOAD", font=("Consolas", 9, "bold"), bg="#0e2838", fg=CYAN_BRIGHT, bd=1, relief="ridge", command=save_exercise, cursor="hand2")
         btn.pack(pady=15, fill="x", padx=25)
 
+    def action_log_snack(self, tag: str = "Nutrient Snack"):
+        """Logs a light ration with canonical snack audio and Alterra voice line."""
+        if hasattr(database, "log_snack"):
+            database.log_snack(tag)
+        else:
+            database.log_intake("snack", 0.5, tag)
+        sfx.play_sfx("eating_snack_logged")
+
+        self.log_terminal(f"VITAL SIGNS: Micro-ration [{tag}] assimilated (+0.5 ration).")
+        self.refresh_display()
+
+        try:
+            line = dialogues.get_dialogue("snack")
+        except Exception:
+            line = "Micro-ration assimilated. Metabolic baseline refreshed."
+
+        threading.Thread(target=speak, args=(line, "pda"), daemon=True).start()
+
     def action_log_nap_dialog(self):
         """
         Interactive recovery modal supporting flexible duration inputs
@@ -515,6 +533,8 @@ class SubnauticaPDAGUI:
                 if not success:
                     raise RuntimeError("Failed to commit recovery cycle to database.")
 
+                sfx.play_sfx("rest_logged")
+
                 hrs = mins / 60.0
                 if mins <= 45:
                     term_msg = f"POWER NAP: {mins}m logged. Process C slump cleared."
@@ -562,7 +582,15 @@ class SubnauticaPDAGUI:
         )
         btn_water.pack(side="left", expand=True, fill="x", padx=2)
 
-        # 2. Meal Ration
+        # 2. Nutrient Snack (+0.5 Ration)
+        btn_snack = tk.Button(
+            row1, text="🥪 + SNACK", font=("Consolas", 8, "bold"),
+            bg="#082230", fg="#FFAD14", activebackground=CYAN_DIM, activeforeground="#ffffff",
+            bd=1, relief="ridge", padx=4, pady=6, cursor="hand2", command=self.action_log_snack
+        )
+        btn_snack.pack(side="left", expand=True, fill="x", padx=2)
+
+        # 3. Full Meal Ration
         btn_meal = tk.Button(
             row1, text="🍲 + LOG MEAL", font=("Consolas", 8, "bold"),
             bg="#0e2838", fg=CYAN_BRIGHT, activebackground=CYAN_DIM, activeforeground="#ffffff",
@@ -570,7 +598,7 @@ class SubnauticaPDAGUI:
         )
         btn_meal.pack(side="left", expand=True, fill="x", padx=2)
 
-        # 3. Primary Sleep Cycle
+        # 4. Primary Sleep Cycle
         btn_sleep = tk.Button(
             row1, text="🌙 + SLEEP CYCLE", font=("Consolas", 8, "bold"),
             bg="#0e2838", fg=CYAN_BRIGHT, activebackground=CYAN_DIM, activeforeground="#ffffff",
@@ -578,7 +606,7 @@ class SubnauticaPDAGUI:
         )
         btn_sleep.pack(side="left", expand=True, fill="x", padx=2)
 
-        # 4. Daytime Power Nap
+        # 5. Daytime Power Nap
         btn_nap = tk.Button(
             row1, text="💤 + RECOVERY NAP", font=("Consolas", 8, "bold"),
             bg="#0a202e", fg="#33b3ff", activebackground=CYAN_DIM, activeforeground="#ffffff",
@@ -595,7 +623,7 @@ class SubnauticaPDAGUI:
         # 1. Brushing Protocol
         btn_brush = tk.Button(
             row2, text="🪥 BRUSH", font=("Consolas", 8, "bold"),
-            bg="#082230", fg="#00c8ff", activebackground=CYAN_DIM, activeforeground="#ffffff",
+            bg="#0e2838", fg=CYAN_BRIGHT, activebackground=CYAN_DIM, activeforeground="#ffffff",
             bd=1, relief="ridge", padx=4, pady=6, cursor="hand2",
             command=getattr(self, "action_log_brush", getattr(self, "action_log_brushing", None))
         )
@@ -604,20 +632,21 @@ class SubnauticaPDAGUI:
         # 2. Decontamination Shower
         btn_shower = tk.Button(
             row2, text="🚿 SHOWER", font=("Consolas", 8, "bold"),
-            bg="#08222a", fg="#00e5a3", activebackground=CYAN_DIM, activeforeground="#ffffff",
+            bg="#0e2838", fg=CYAN_BRIGHT, activebackground=CYAN_DIM, activeforeground="#ffffff",
             bd=1, relief="ridge", padx=4, pady=6, cursor="hand2", command=self.action_log_shower
         )
         btn_shower.pack(side="left", expand=True, fill="x", padx=2)
-        
+
+        # 3. Biometric Readiness Diagnostic
         btn_readiness = tk.Button(
             row2, text="🧠 READINESS", font=("Consolas", 8, "bold"),
-            bg="#0a192f", fg="#00ffff", activebackground=CYAN_DIM, activeforeground="#ffffff",
+            bg="#0a192f", fg="#00ff00", activebackground=CYAN_DIM, activeforeground="#ffffff",
             bd=1, relief="ridge", padx=4, pady=6, cursor="hand2",
             command=self.run_readiness_diagnostic
         )
         btn_readiness.pack(side="left", expand=True, fill="x", padx=2)
 
-        # 3. Physical Exertion / Workout Load
+        # 4. Physical Exertion / Workout Load
         btn_ex = tk.Button(
             row2, text="⚡ WORKOUT", font=("Consolas", 8, "bold"),
             bg="#211806", fg="#ffaa00", activebackground="#3d2a08", activeforeground="#ffffff",
@@ -625,7 +654,7 @@ class SubnauticaPDAGUI:
         )
         btn_ex.pack(side="left", expand=True, fill="x", padx=2)
 
-        # 4. Multi-Table Telemetry Rollback
+        # 5. Multi-Table Telemetry Rollback
         btn_undo = tk.Button(
             row2, text="↺ UNDO", font=("Consolas", 8, "bold"),
             bg="#211014", fg="#ff4455", activebackground="#38151c", activeforeground="#ffffff",
@@ -633,14 +662,13 @@ class SubnauticaPDAGUI:
         )
         btn_undo.pack(side="left", expand=False, padx=2)
 
-        # 5. Biometric Archives
+        # 6. Biometric Archives
         btn_archives = tk.Button(
             row2, text="📊 ARCHIVES", font=("Consolas", 8, "bold"),
             bg="#0e2838", fg=CYAN_BRIGHT, activebackground=CYAN_DIM, activeforeground="#ffffff",
             bd=1, relief="ridge", padx=6, pady=6, cursor="hand2", command=self.action_view_archives
         )
         btn_archives.pack(side="left", expand=False, padx=2)
-
 
     def _build_telemetry_terminal(self):
         term_frame = tk.Frame(self.root, bg=BG_DARK, padx=20, pady=4)
@@ -778,7 +806,6 @@ class SubnauticaPDAGUI:
         else:
             self.lbl_system_mode.config(text="[ TELEMETRY ACTIVE ]", fg=SUCCESS_GREEN)
 
-
     def poll_timers(self):
         self.refresh_display()
 
@@ -839,6 +866,7 @@ class SubnauticaPDAGUI:
         menu = pystray.Menu(
             pystray.MenuItem("Open Alterra HUD", self.show_from_tray, default=True),
             pystray.MenuItem("+ Log Water (250ml)", lambda: self.root.after(0, self.action_log_water)),
+            pystray.MenuItem("+ Log Snack (0.5 Ration)", lambda: self.root.after(0, self.action_log_snack)),
             pystray.MenuItem("+ Log Sustenance Meal", lambda: self.root.after(0, self.action_log_meal)),
             pystray.MenuItem("🪥 Log Brushing", lambda: self.root.after(0, self.action_log_brush)),
             pystray.MenuItem("🚿 Log Shower", lambda: self.root.after(0, self.action_log_shower)),
@@ -904,10 +932,9 @@ class SubnauticaPDAGUI:
 
     def action_log_water(self, amount: float = 250.0):
         """Logs standard 250ml water canister intake with acoustic and voice feedback."""
-        import sfx_manager as sfx
-
-        sfx.play_sfx("intake")
         database.log_water(amount)
+        sfx.play_sfx("water_intake_logged")
+
         self.log_terminal(f"VITAL SIGNS: Hydration fluid (+{int(amount)}ml) assimilated.")
         self.refresh_display()
 
@@ -919,16 +946,16 @@ class SubnauticaPDAGUI:
         threading.Thread(target=speak, args=(line, "pda"), daemon=True).start()
 
     def action_log_meal(self, tag: str = "Standard Ration"):
-        """Logs nutritional ration intake with acoustic and voice feedback."""
-        import sfx_manager as sfx
-
-        sfx.play_sfx("click")
+        """Logs nutritional ration intake and triggers eating_food_logged.wav post-commit."""
         database.log_meal(tag)
+        sfx.play_sfx("eating_food_logged")
+
         self.log_terminal(f"VITAL SIGNS: Caloric ration [{tag}] integrated.")
         self.refresh_display()
 
         try:
-            line = dialogues.get_dialogue("meal") if hasattr(dialogues, "get_dialogue") else "Caloric intake recorded. Metabolic balance stabilized."
+            totals = database.get_today_totals()
+            line = dialogues.get_meal_logged_line(tag, int(totals.get("meals_count", 1)), int(self.hud.target_meals))
         except Exception:
             line = "Caloric intake recorded. Metabolic balance stabilized."
 
@@ -949,6 +976,8 @@ class SubnauticaPDAGUI:
             database.log_hygiene("shower")
         except AttributeError:
             database.log_intake("hygiene", 1.0, "shower")
+        sfx.play_sfx("shower_logged")
+
         self.log_terminal("HYGIENE LOGGED: Full dermal decontamination cycle complete.")
         self.refresh_display()
         line = "Dermal decontamination confirmed. External bio-contaminant levels normalized."
@@ -956,23 +985,17 @@ class SubnauticaPDAGUI:
 
     def action_undo_intake(self):
         """Purges the most recent telemetry entry across intake, hygiene, exercise, or naps."""
-        import sfx_manager as sfx
-
         deleted = database.undo_last_intake()
         if not deleted:
-            sfx.play_sfx("alert")
             self.log_terminal("UNDO NOTICE: No recent telemetry entries found to purge.")
             messagebox.showinfo("Alterra PDA", "No recent records found to rollback.")
             return
-
-        # Trigger acoustic de-synth sweep
-        sfx.play_sfx("rollback")
 
         i_type = deleted.get("type", "unknown")
         amt = deleted.get("amount", 0)
         tag = deleted.get("tag", "")
 
-        # Format descriptive HUD terminal feedback across all 5 operational vectors
+        # Format descriptive HUD terminal feedback across all operational vectors
         if i_type == "hydration":
             msg = f"Purged {int(amt)}ml fluid"
         elif i_type == "hygiene":
@@ -981,6 +1004,8 @@ class SubnauticaPDAGUI:
             msg = f"Purged exertion log: {float(amt):.1f}h {tag}"
         elif i_type == "nap":
             msg = f"Purged recovery sleep: {int(amt)}m nap"
+        elif i_type == "snack":
+            msg = f"Purged micro-ration: {tag}"
         else:
             msg = f"Purged nutritional ration: {tag}"
 
@@ -1016,7 +1041,6 @@ class SubnauticaPDAGUI:
             font=("Consolas", 11, "bold"), fg=CYAN_BRIGHT, bg=PANEL_BG
         ).pack(pady=10)
 
-        from time_sync import time_manager
         current_dt = time_manager.now()
 
         grid_frame = tk.Frame(win, bg=PANEL_BG)
@@ -1096,6 +1120,7 @@ class SubnauticaPDAGUI:
                     dis_val,
                     "Manual HUD Entry"
                 )
+                sfx.play_sfx("rest_logged")
                 win.destroy()
 
                 import sleep_analytics
@@ -1115,7 +1140,6 @@ class SubnauticaPDAGUI:
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to record sleep cycle: {e}")
 
-                
         btn_save = tk.Button(
             win, text="CONFIRM RECOVERY", font=("Consolas", 10, "bold"),
             bg="#0e2838", fg=CYAN_BRIGHT, activebackground=CYAN_DIM,
@@ -1309,6 +1333,8 @@ class SubnauticaPDAGUI:
                     amt_str = f"{int(r.get('amount', 0))}ml"
                 elif t == "hygiene":
                     amt_str = "Completed"
+                elif t == "snack":
+                    amt_str = "0.5 ration"
                 else:
                     amt_str = f"{int(r.get('amount', 1))} meal"
                 tree_intake.insert("", "end", values=(
@@ -1360,7 +1386,7 @@ class SubnauticaPDAGUI:
                 first_day_dmy = time_sync.format_date_dmy(data.get('first_day', ''), include_time=False)
                 report = (
                     "==========================================================\n"
-                    "       ALTERRA CORP // LIFETIME TELEMETRY ARCHIVE         \n"
+                    "       ALTERRA CORP // LIFETIME TELEMETRY ARCHIVE          \n"
                     "==========================================================\n\n"
                     f"  * Telemetry Genesis:          {first_day_dmy}\n"
                     f"  * Total Active Days Monitored:{data['days_logged']} cycles\n\n"
@@ -1400,7 +1426,12 @@ class SubnauticaPDAGUI:
                 populate_lifetime()
             loaded_tabs.add(cur)
 
-        notebook.bind("<<NotebookTabChanged>>", lambda e: load_current_tab())
+        def on_tab_changed(event):
+            if getattr(win, "_tabs_ready", False):
+                sfx.play_sfx("archive_tab_switches")
+            load_current_tab()
+
+        notebook.bind("<<NotebookTabChanged>>", on_tab_changed)
 
         def switch_scope(scope_days):
             archive_scope["days"] = scope_days
@@ -1420,6 +1451,7 @@ class SubnauticaPDAGUI:
 
         # Initial load: only load Tab 0
         load_current_tab(force=True)
+        win._tabs_ready = True
 
         # --- BOTTOM ACTION BAR ---
         bar_actions = tk.Frame(win, bg=PANEL_BG, pady=6, padx=12)
@@ -1610,7 +1642,7 @@ class SubnauticaPDAGUI:
         tk.Label(body, text="System Timezone (GMT):", font=("Consolas", 9), fg=TEXT_LIGHT, bg=PANEL_BG).grid(row=row, column=0, sticky="w", pady=2)
         current_tz = cfg.get("timezone", "UTC")
         default_label = next((k for k, v in TIMEZONE_MAP.items() if v == current_tz), "Asia/Kolkata (GMT+05:30)")
-        
+
         combo_tz = ttk.Combobox(body, values=list(TIMEZONE_MAP.keys()), width=28, state="readonly")
         combo_tz.set(default_label)
         combo_tz.grid(row=row, column=1, sticky="w", pady=2)
@@ -1662,6 +1694,7 @@ class SubnauticaPDAGUI:
 
                 config_manager.save_config(new_cfg)
                 self.hud.reload_config()
+                sfx.play_sfx("settings_updated")
                 self.refresh_display()
                 self.log_terminal("CONFIG OVERRIDE: Bio-parameters, 12h sleep windows, and targets committed.")
                 messagebox.showinfo("Alterra PDA", "Biometric targets and system configuration saved successfully.")

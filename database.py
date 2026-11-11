@@ -383,6 +383,9 @@ def log_intake(intake_type: str, amount: float = 1.0, tag: str = ""):
 def log_water(amount_ml: float = 250.0):
     log_intake("hydration", amount_ml, "Hydration Fluid")
 
+def log_snack(tag: str = "Nutrient Snack"):
+    """Logs a light caloric snack (counted as 0.5 standard ration equivalent)."""
+    log_intake("snack", 0.5, tag)
 
 def log_meal(tag: str = "Standard Ration"):
     log_intake("meal", 1.0, tag)
@@ -766,7 +769,8 @@ def get_today_totals() -> dict:
             res = supabase.table("intake_logs").select("type, amount").gte("logged_at", start_of_day_utc).execute()
             rows = res.data or []
             water_ml = sum(r["amount"] for r in rows if r["type"] == "hydration")
-            meals_count = sum(1 for r in rows if r["type"] == "meal")
+            # Meals count as 1.0, snacks count as 0.5
+            meals_count = sum(r["amount"] for r in rows if r["type"] in ("meal", "snack"))
             return {"water_ml": water_ml, "meals_count": meals_count}
         except Exception as e:
             print(f"[SUPABASE ERROR] {e}")
@@ -778,7 +782,7 @@ def get_today_totals() -> dict:
     conn.close()
 
     water_ml = sum(r[1] for r in rows if r[0] == "hydration")
-    meals_count = sum(1 for r in rows if r[0] == "meal")
+    meals_count = sum(r[1] for r in rows if r[0] in ("meal", "snack"))
     return {"water_ml": water_ml, "meals_count": meals_count}
 
 
